@@ -23,7 +23,7 @@
     <main class="stage">
       <header class="topbar">
         <div>
-          <p class="page-kicker">AetherWatch</p>
+          <p class="page-kicker">{{ kicker }}</p>
           <h1 class="page-title">{{ title }}</h1>
         </div>
         <div class="page-date">{{ dateLine }}</div>
@@ -34,7 +34,9 @@
 </template>
 
 <script setup lang="ts">
-const props = defineProps<{ title: string; variant?: "paper" | "earth" }>()
+const props = withDefaults(defineProps<{ title: string; variant?: "paper" | "earth"; kicker?: string }>(), {
+  kicker: "AetherWatch",
+})
 const open = ref(false)
 const route = useRoute()
 const visitors = ref("—")

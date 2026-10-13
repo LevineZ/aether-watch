@@ -242,12 +242,13 @@ img { max-width: 100%; }
   grid-template-columns: 1fr 1fr;
   gap: 0.85rem;
 }
+.map-grid.solo { grid-template-columns: 1fr; }
 .map-card {
   background: #fbf7f0;
   border: 1px solid var(--rule);
   border-radius: 12px;
   overflow: hidden;
-  min-height: 280px;
+  min-height: 320px;
   display: flex;
   flex-direction: column;
 }
@@ -269,6 +270,88 @@ img { max-width: 100%; }
   font-family: var(--font-mono);
   font-size: 0.62rem;
   color: var(--ink-faint);
+}
+
+.f-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-bottom: 0.95rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--rule);
+}
+.f-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.f-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  min-width: 2.4rem;
+}
+.fsec-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+.fbusy {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+}
+.tax { margin: 0.15rem 0 0.85rem; }
+.tax-top {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+}
+.tax-now {
+  background: var(--accent);
+  color: #fff7f2;
+  border-radius: 8px;
+  padding: 0.12rem 0.45rem;
+  font-size: 0.72rem;
+}
+.tax-hint { color: var(--ink-faint); }
+.play {
+  margin-left: auto;
+  border-radius: 999px;
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0.32rem 0.75rem;
+}
+.play:hover { background: var(--accent-2); }
+.tax-range {
+  width: 100%;
+  margin: 0.45rem 0 0.2rem;
+  accent-color: var(--accent);
+}
+.tax-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+}
+.tax-ticks .on { color: var(--accent); font-weight: 600; }
+.coord-hint {
+  color: var(--ink-faint);
+  font-size: 0.78rem;
 }
 
 .slider-row {

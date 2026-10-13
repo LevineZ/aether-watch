@@ -12,6 +12,7 @@
         <p>
           <strong>预览（无需上传）</strong>走 Open-Meteo 免费预报 API（非商业、无需密钥）：点上序列是真实网络请求；
           中国范围的空间场默认按约 40×30 点采样（可用 <code>FIELD_NX</code> / <code>FIELD_NY</code> 调节）。
+          预报页多模式地图共用同一镜头：缩放与平移同步，单击格点更新下方时间序列。
           地球页默认洋流来自 Open-Meteo Marine（<code>ocean_current_velocity/direction</code>），风场仍是 10 米 u/v；
           两者都可在地球页切换。公开源失败时会回落到标注了「合成场」的程序场。
         </p>

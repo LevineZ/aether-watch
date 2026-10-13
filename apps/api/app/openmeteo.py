@@ -231,7 +231,7 @@ async def fetch_field(
             "longitude": lon_s,
             "hourly": om_var if om_var != "surface_pressure" else "surface_pressure,pressure_msl",
             "models": model,
-            "forecast_days": "2",
+            "forecast_days": "6",
             "timezone": "UTC",
             "wind_speed_unit": "ms",
         }

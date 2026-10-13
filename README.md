@@ -16,7 +16,7 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 | Path | What |
 | --- | --- |
 | `/` | Earth globe — **洋流** particles by default, switchable **风场** / scalar overlays |
-| `/forecast` | Model chips, denser China field maps, Open-Meteo series |
+| `/forecast` | Linked-camera model compare (zoom/pan in sync), click-for-series, +0–120h steps |
 | `/news` | Seeded Markdown notes |
 | `/feeds` | Ingest / tile actor timeline |
 | `/about` | Stack and data-plane notes |
@@ -57,7 +57,7 @@ docker compose up --build
 浏览器打开 `http://127.0.0.1:8765`。导航：地球 / 预报 / 资讯 / 动态 / 关于 / 管理。
 
 - 地球页默认 **洋流**（Open-Meteo Marine 表层流），可切到 **风场** 与气温 / 气压 / 降水；模式芯片会跟着要素换成 Marine/SMOC 或 GFS/IFS。
-- 预报页的时间序列来自 Open-Meteo 的真实 HTTP 请求（GFS / IFS / AIFS 等）。
+- 预报页多图 **镜头联动**（滚轮缩放 / 拖动平移同步），单击格点拉序列；时效 +0h～+120h，可播放。时间序列来自 Open-Meteo（GFS / IFS / AIFS 等）。
 - 中国空间场默认约 **40×30** 点采样（不再是 10×7 色块）。
 - 管理页可上传 NetCDF；`NcIngestActor` 解析，`NcTileActor` 产出一张二维场给地图。u/v 洋流 NetCDF 会出现在地球页洋流模式里。
 - 公开源失败时地球粒子回落合成场，来源行会标明「合成场」。
