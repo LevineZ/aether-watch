@@ -3,7 +3,7 @@
     <canvas ref="stars" class="star-cv" aria-hidden="true" />
     <div ref="host" class="globe-el" />
     <div class="globe-vignette" aria-hidden="true" />
-    <div v-if="!ready" class="globe-boot">正在装载地球…</div>
+    <div v-if="!ready" class="globe-boot">{{ t("earth.loading") }}</div>
   </div>
 </template>
 
@@ -15,6 +15,7 @@ import { fieldCorners, rasterizeField, type ScalarField } from "~/utils/rasterFi
 import { WindParticleLayer, type FlowKind } from "~/utils/windLayer"
 import type { Wind } from "~/utils/windField"
 import type { Palette } from "~/utils/colormap"
+import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_DARK } from "~/utils/mapLabels"
 
 const props = defineProps<{
   flow: Wind | null
@@ -25,6 +26,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ ready: [] }>()
+const { t, locale } = useI18n()
 const wrap = ref<HTMLDivElement | null>(null)
 const host = ref<HTMLDivElement | null>(null)
 const stars = ref<HTMLCanvasElement | null>(null)
@@ -66,7 +68,7 @@ function onResize() {
   map?.resize()
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (!host.value || !wrap.value) return
   paintStars(stars.value!, wrap.value.clientWidth, wrap.value.clientHeight)
   layer = new WindParticleLayer()
@@ -75,9 +77,16 @@ onMounted(() => {
   // Currents seed/advect only in water (0.5° land mask). Wind is allowed over land.
   if (props.flow) layer.setField(props.flow, props.kind || "current")
 
+  let style: string | object = OPENFREEMAP_DARK
+  try {
+    style = await loadOpenFreeMapStyle("dark", locale.value)
+  } catch {
+    /* URL fallback */
+  }
+
   map = new maplibregl.Map({
     container: host.value,
-    style: "https://tiles.openfreemap.org/styles/dark",
+    style: style as never,
     center: [132, 18],
     zoom: 1.62,
     minZoom: 0.7,
@@ -93,7 +102,7 @@ onMounted(() => {
   map.touchPitch.disable()
   map.on("style.load", () => {
     if (!map || !layer) return
-    restyleGlobe(map)
+    restyleGlobe(map, locale.value)
     if (!map.getLayer(layer.id)) map.addLayer(layer)
     paintOverlay()
     ready.value = true
@@ -122,6 +131,10 @@ watch(
   () => [props.field, props.palette] as const,
   () => paintOverlay(),
 )
+
+watch(locale, (lang) => {
+  if (map?.isStyleLoaded()) restyleGlobe(map, lang)
+})
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", onResize)

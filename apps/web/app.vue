@@ -8,4 +8,15 @@
 
 <script setup lang="ts">
 const route = useRoute()
+const { locale, hydrateLocale } = useI18n()
+
+useHead({
+  htmlAttrs: {
+    lang: computed(() => (locale.value === "en" ? "en" : "zh-CN")),
+  },
+})
+
+onMounted(() => {
+  hydrateLocale()
+})
 </script>

@@ -5,13 +5,14 @@
         <BrandMark />
         <span>
           <span class="brand-name">AetherWatch</span>
-          <span class="brand-sub" style="color:#b7aea2">Earth Observatory</span>
+          <span class="brand-sub" style="color:#b7aea2">{{ t("brand.earthSub") }}</span>
         </span>
       </NuxtLink>
       <nav>
         <NuxtLink v-for="item in nav" :key="item.to" :to="item.to" :class="{ active: item.to === '/' }">
-          {{ item.cn }}
+          {{ t(item.key) }}
         </NuxtLink>
+        <LocaleToggle earth />
       </nav>
     </header>
     <ClientOnly>
@@ -24,11 +25,11 @@
         @ready="globeReady = true"
       />
       <template #fallback>
-        <div class="loading" style="color:#ddd;padding:6rem 2rem">正在装载地球…</div>
+        <div class="loading" style="color:#ddd;padding:6rem 2rem">{{ t("earth.loading") }}</div>
       </template>
     </ClientOnly>
     <aside class="earth-panel">
-      <label>要素</label>
+      <label>{{ t("earth.element") }}</label>
       <div class="chips">
         <button
           v-for="el in elements"
@@ -38,10 +39,10 @@
           type="button"
           @click="selectVariable(el.id)"
         >
-          {{ el.label }}
+          {{ elName(el) }}
         </button>
       </div>
-      <label>模式</label>
+      <label>{{ t("earth.model") }}</label>
       <div class="chips">
         <button
           v-for="m in modelOptions"
@@ -54,21 +55,21 @@
           {{ m.short }}
         </button>
       </div>
-      <label>图层</label>
+      <label>{{ t("earth.layer") }}</label>
       <div class="chips">
         <button class="chip" :class="{ active: playing }" type="button" @click="playing = !playing">
-          {{ playing ? `${activeEl?.label || "粒子"}动画 开` : `${activeEl?.label || "粒子"}动画 停` }}
+          {{ playing ? t("earth.animOn", { label: elName(activeEl) || t("earth.particles") }) : t("earth.animOff", { label: elName(activeEl) || t("earth.particles") }) }}
         </button>
       </div>
       <div class="legend" v-if="activeEl?.kind === 'vector'">
-        <span>{{ activeEl?.label }}</span>
+        <span>{{ elName(activeEl) }}</span>
         <i :style="{ background: legendCss }" />
         <span>{{ activeEl?.unit }}</span>
       </div>
       <div class="clock">
-        {{ clock }}
+        {{ t("earth.clock", { time: clock }) }}
         <div class="src">{{ source }}</div>
-        <div class="hint">拖动旋转 · 滚轮缩放 · 切换即重载场</div>
+        <div class="hint">{{ t("earth.hint") }}</div>
       </div>
     </aside>
   </div>
@@ -78,20 +79,23 @@
 import { paletteCss, type Palette } from "~/utils/colormap"
 import type { Wind } from "~/utils/windField"
 import type { ScalarField } from "~/utils/rasterField"
+import type { MessageKey } from "~/utils/messages"
 
-useHead({ title: "地球 · AetherWatch" })
-const nav = [
-  { to: "/", cn: "地球" },
-  { to: "/forecast", cn: "预报" },
-  { to: "/news", cn: "资讯" },
-  { to: "/feeds", cn: "动态" },
-  { to: "/about", cn: "关于" },
-  { to: "/admin", cn: "管理" },
+const { t, locale } = useI18n()
+useHead({ title: computed(() => `${t("earth.title")} · AetherWatch`) })
+const nav: { to: string; key: MessageKey }[] = [
+  { to: "/", key: "nav.earth" },
+  { to: "/forecast", key: "nav.forecast" },
+  { to: "/news", key: "nav.news" },
+  { to: "/feeds", key: "nav.feeds" },
+  { to: "/about", key: "nav.about" },
+  { to: "/admin", key: "nav.admin" },
 ]
 
 type GlobeEl = {
   id: string
   label: string
+  label_en?: string
   kind: "vector" | "scalar"
   endpoint: string
   palette: Palette
@@ -100,11 +104,11 @@ type GlobeEl = {
 type ModelChip = { id: string; short: string; kind?: string }
 
 const fallbackElements: GlobeEl[] = [
-  { id: "ocean_current", label: "洋流", kind: "vector", endpoint: "currents", palette: "current", unit: "m/s" },
-  { id: "wind_speed_10m", label: "风场", kind: "vector", endpoint: "wind", palette: "wind", unit: "m/s" },
-  { id: "temperature_2m", label: "气温", kind: "scalar", endpoint: "field", palette: "thermal", unit: "°C" },
-  { id: "surface_pressure", label: "气压", kind: "scalar", endpoint: "field", palette: "pressure", unit: "hPa" },
-  { id: "precipitation", label: "降水", kind: "scalar", endpoint: "field", palette: "rain", unit: "mm" },
+  { id: "ocean_current", label: "洋流", label_en: "Currents", kind: "vector", endpoint: "currents", palette: "current", unit: "m/s" },
+  { id: "wind_speed_10m", label: "风场", label_en: "Wind", kind: "vector", endpoint: "wind", palette: "wind", unit: "m/s" },
+  { id: "temperature_2m", label: "气温", label_en: "Temperature", kind: "scalar", endpoint: "field", palette: "thermal", unit: "°C" },
+  { id: "surface_pressure", label: "气压", label_en: "Pressure", kind: "scalar", endpoint: "field", palette: "pressure", unit: "hPa" },
+  { id: "precipitation", label: "降水", label_en: "Precip", kind: "scalar", endpoint: "field", palette: "rain", unit: "mm" },
 ]
 const weatherModels: ModelChip[] = [
   { id: "gfs_seamless", short: "GFS" },
@@ -124,10 +128,25 @@ const model = ref("best_match")
 const playing = ref(true)
 const flow = ref<Wind | null>(null)
 const scalar = ref<ScalarField | null>(null)
-const source = ref("正在请求 Open-Meteo 洋流…")
+const srcState = ref<{
+  mode: "req-current" | "req-wind" | "req-field" | "live" | "synth" | "down-current" | "down-wind" | "down-field"
+  kind?: string
+  src?: string
+}>({ mode: "req-current" })
 const globeReady = ref(false)
-const clock = beijingStamp().clock
+const clock = computed(() => beijingStamp(undefined, locale.value).clock)
 const loadGen = ref(0)
+const source = computed(() => {
+  const s = srcState.value
+  if (s.mode === "req-current") return t("earth.requestCurrent")
+  if (s.mode === "req-wind") return t("earth.requestWind")
+  if (s.mode === "req-field") return t("earth.requestField", { label: s.kind || "" })
+  if (s.mode === "down-current") return t("earth.currentDown")
+  if (s.mode === "down-wind") return t("earth.windDown")
+  if (s.mode === "down-field") return t("earth.fieldDown", { label: s.kind || "" })
+  if (s.mode === "synth") return t("earth.synthetic", { kind: s.kind || "" })
+  return t("earth.live", { kind: s.kind || "", src: s.src || "open-meteo" })
+})
 
 const activeEl = computed(() => elements.value.find((e) => e.id === variable.value) || elements.value[0])
 const flowKind = computed(() => (variable.value === "wind_speed_10m" ? "wind" : "current"))
@@ -138,6 +157,11 @@ const modelOptions = computed(() => {
   if (activeEl.value?.endpoint === "wind") return [...weatherModels]
   return [...weatherModels, ...extra]
 })
+
+function elName(el?: GlobeEl | null) {
+  if (!el) return ""
+  return locale.value === "en" ? el.label_en || el.label : el.label
+}
 
 function selectVariable(id: string) {
   if (variable.value === id) return
@@ -178,7 +202,7 @@ async function load() {
   const seq = ++loadGen.value
   const mid = model.value
   if (el.kind === "vector" && el.endpoint === "currents") {
-    source.value = "正在请求 Open-Meteo 洋流…"
+    srcState.value = { mode: "req-current" }
     scalar.value = null
     try {
       const data = await $fetch<Wind & { source?: string; fallback?: boolean }>(resolveApi("/api/currents"), {
@@ -186,29 +210,29 @@ async function load() {
       })
       if (seq !== loadGen.value) return
       flow.value = data
-      source.value = describeSource("洋流", data)
+      srcState.value = describeSource(elName(el), data)
     } catch {
       if (seq !== loadGen.value) return
-      source.value = "洋流暂不可用，将显示合成场"
+      srcState.value = { mode: "down-current" }
     }
     return
   }
   if (el.kind === "vector") {
-    source.value = "正在请求 Open-Meteo 10 m 风场…"
+    srcState.value = { mode: "req-wind" }
     scalar.value = null
     try {
       const data = await $fetch<Wind>(resolveApi("/api/wind"), { query: { model: mid } })
       if (seq !== loadGen.value) return
       flow.value = data
-      source.value = describeSource("风场", data as { source?: string; fallback?: boolean })
+      srcState.value = describeSource(elName(el), data as { source?: string; fallback?: boolean })
     } catch {
       if (seq !== loadGen.value) return
-      source.value = "风场暂不可用，将显示合成场"
+      srcState.value = { mode: "down-wind" }
     }
     return
   }
   flow.value = null
-  source.value = `正在请求 ${el.label} 场…`
+  srcState.value = { mode: "req-field", kind: elName(el) }
   try {
     const data = await $fetch<ScalarField>(resolveApi("/api/field"), {
       query: {
@@ -225,10 +249,10 @@ async function load() {
     })
     if (seq !== loadGen.value) return
     scalar.value = data
-    source.value = `${el.label} · ${(data as { source?: string }).source || "open-meteo"}`
+    srcState.value = { mode: "live", kind: elName(el), src: (data as { source?: string }).source || "open-meteo" }
   } catch {
     if (seq !== loadGen.value) return
-    source.value = `${el.label} 暂不可用`
+    srcState.value = { mode: "down-field", kind: elName(el) }
   }
 }
 
@@ -241,8 +265,8 @@ watch([variable, model], load)
 function describeSource(kind: string, data: { source?: string; fallback?: boolean }) {
   const src = data.source || ""
   if (data.fallback || src.startsWith("synthetic")) {
-    return `${kind} · 合成场（Open-Meteo 暂不可用）`
+    return { mode: "synth" as const, kind }
   }
-  return `${kind} · ${src || "open-meteo"}`
+  return { mode: "live" as const, kind, src: src || "open-meteo" }
 }
 </script>

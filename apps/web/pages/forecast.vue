@@ -1,8 +1,8 @@
 <template>
-  <AppShell title="预报" kicker="AetherWatch · Model Forecast">
+  <AppShell :title="t('forecast.title')" :kicker="t('forecast.kicker')">
     <div class="f-toolbar">
-      <div class="f-row" role="group" aria-label="要素选择">
-        <span class="f-label">要素</span>
+      <div class="f-row" role="group" :aria-label="t('forecast.ariaElements')">
+        <span class="f-label">{{ t("forecast.element") }}</span>
         <button
           v-for="el in elements"
           :key="el.id"
@@ -11,11 +11,11 @@
           type="button"
           @click="variable = el.id"
         >
-          {{ el.label }}
+          {{ elLabel(el) }}
         </button>
       </div>
-      <div class="f-row" role="group" aria-label="模式选择">
-        <span class="f-label">模式</span>
+      <div class="f-row" role="group" :aria-label="t('forecast.ariaModels')">
+        <span class="f-label">{{ t("forecast.model") }}</span>
         <button
           v-for="m in modelOptions"
           :key="m.id"
@@ -27,8 +27,8 @@
           <i class="dot" :style="{ background: m.color }" />
           {{ m.short }}
         </button>
-        <button class="ghost" type="button" title="全选" @click="selectPreview">✓ 全选</button>
-        <button class="ghost" type="button" @click="selected = selected.slice(0, 1)">清空</button>
+        <button class="ghost" type="button" :title="t('forecast.selectAll')" @click="selectPreview">{{ t("forecast.selectAll") }}</button>
+        <button class="ghost" type="button" @click="selected = selected.slice(0, 1)">{{ t("forecast.clear") }}</button>
       </div>
     </div>
     <p v-if="note" class="banner">{{ note }}</p>
@@ -36,18 +36,18 @@
     <section class="panel fsec">
       <header class="fsec-head">
         <h2 class="section-title">
-          空间分布对比
-          <small>{{ currentElement?.label }} {{ unit }} · 真实模式预报场</small>
+          {{ t("forecast.spatial") }}
+          <small>{{ t("forecast.realField", { label: elLabel(currentElement), unit }) }}</small>
         </h2>
         <span v-if="fieldLoading" class="fbusy" role="status">{{ busyLine }}</span>
       </header>
       <div class="tax">
         <div class="tax-top">
-          <span>预报时效</span>
+          <span>{{ t("forecast.lead") }}</span>
           <strong class="tax-now">{{ validStamp }}</strong>
-          <span class="tax-hint">+0h ~ +120h · 北京时</span>
+          <span class="tax-hint">{{ t("forecast.bjtRange") }}</span>
           <button class="play" type="button" :aria-pressed="playing" @click="togglePlay">
-            {{ playing ? "暂停" : "播放" }}
+            {{ playing ? t("forecast.pause") : t("forecast.play") }}
           </button>
         </div>
         <input
@@ -57,7 +57,7 @@
           :max="leads.length - 1"
           step="1"
           v-model.number="leadIndex"
-          :aria-label="`预报时效 +${lead}h`"
+          :aria-label="t('forecast.ariaLead', { lead })"
         />
         <div class="tax-ticks">
           <span v-for="h in leads" :key="h" :class="{ on: h === lead }">+{{ h }}h</span>
@@ -90,22 +90,22 @@
     <section class="panel fsec">
       <header class="fsec-head">
         <h2 class="section-title">
-          指定格点 · 多模式演变
-          <small>{{ currentElement?.label }} {{ unit }} · 横轴为有效时刻（北京时）</small>
+          {{ t("forecast.pointSeries") }}
+          <small>{{ t("forecast.axisHint", { label: elLabel(currentElement), unit }) }}</small>
         </h2>
-        <span v-if="seriesLoading" class="fbusy" role="status">序列加载中…</span>
+        <span v-if="seriesLoading" class="fbusy" role="status">{{ t("forecast.loadingSeries") }}</span>
       </header>
       <div class="coord-row">
-        <span class="f-label">格点坐标</span>
-        <label>纬度 <input v-model="latText" type="number" step="0.1" aria-label="纬度" /></label>
-        <label>经度 <input v-model="lonText" type="number" step="0.1" aria-label="经度" /></label>
-        <button class="ghost" type="button" @click="commitCoords">定位</button>
-        <button class="ghost" type="button" @click="beijing">北京</button>
-        <button class="ghost" type="button" @click="shanghai">上海</button>
-        <span class="coord-hint">或直接在空间图上点选格点</span>
+        <span class="f-label">{{ t("forecast.coords") }}</span>
+        <label>{{ t("forecast.lat") }} <input v-model="latText" type="number" step="0.1" :aria-label="t('forecast.lat')" /></label>
+        <label>{{ t("forecast.lon") }} <input v-model="lonText" type="number" step="0.1" :aria-label="t('forecast.lon')" /></label>
+        <button class="ghost" type="button" @click="commitCoords">{{ t("forecast.locate") }}</button>
+        <button class="ghost" type="button" @click="beijing">{{ t("forecast.beijing") }}</button>
+        <button class="ghost" type="button" @click="shanghai">{{ t("forecast.shanghai") }}</button>
+        <span class="coord-hint">{{ t("forecast.clickHint") }}</span>
       </div>
       <SeriesChart v-if="chartTimes.length" :times="chartTimes" :series="chartSeries" :unit="unit" />
-      <p v-else class="empty">{{ seriesError || "等待 Open-Meteo 返回…" }}</p>
+      <p v-else class="empty">{{ seriesError || t("forecast.waitOm") }}</p>
     </section>
   </AppShell>
 </template>
@@ -121,7 +121,8 @@ import {
   type MapCamera,
 } from "~/composables/useLinkedCamera"
 
-useHead({ title: "预报 · AetherWatch" })
+const { t, locale } = useI18n()
+useHead({ title: computed(() => `${t("forecast.title")} · AetherWatch`) })
 type Model = { id: string; short: string; color: string; kind?: string; status?: string }
 type Element = { id: string; label: string; label_en: string; unit: string; palette: string }
 
@@ -159,9 +160,18 @@ const modelOptions = computed(() => [
   ...datasets.value.filter((d) => d.status === "ready"),
 ])
 const mapsToShow = computed(() => selected.value.slice(0, 4))
-const busyLine = computed(
-  () => `正在加载 ${currentElement.value?.label || variable.value} · ${mapsToShow.value.length} 个模式 · +${lead.value}h`,
+const busyLine = computed(() =>
+  t("forecast.loadingField", {
+    label: elLabel(currentElement.value) || variable.value,
+    n: mapsToShow.value.length,
+    lead: lead.value,
+  }),
 )
+
+function elLabel(el?: Element | null) {
+  if (!el) return ""
+  return locale.value === "en" ? el.label_en || el.label : el.label
+}
 const validStamp = computed(() => {
   const first = mapsToShow.value.map((id) => fields.value[id] as { valid_time?: string } | undefined).find((f) => f?.valid_time)
   return first?.valid_time ? beijingShort(first.valid_time) : `+${lead.value}h`
@@ -288,9 +298,11 @@ async function loadSeries() {
       values: m.values,
     }))
     const missing = Object.keys(data.errors || {})
-    note.value = missing.length ? `部分模式缺 ${currentElement.value?.label}：${missing.join(", ")}` : ""
+    note.value = missing.length
+      ? t("forecast.missing", { label: elLabel(currentElement.value), list: missing.join(", ") })
+      : ""
   } catch (e: unknown) {
-    seriesError.value = e instanceof Error ? e.message : "序列请求失败"
+    seriesError.value = e instanceof Error ? e.message : t("forecast.seriesFail")
   } finally {
     seriesLoading.value = false
   }
@@ -316,7 +328,7 @@ async function loadFields() {
           },
         })
       } catch (e: unknown) {
-        fieldError.value = e instanceof Error ? e.message : "场数据失败"
+        fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
       }
     }),
   )

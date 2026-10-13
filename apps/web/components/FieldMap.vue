@@ -6,24 +6,24 @@
         {{ title }}
       </h3>
       <span v-if="field?.valid_time" class="map-valid" :title="validTitle">{{ validLabel }}</span>
-      <div class="map-tools" role="group" aria-label="视图缩放">
-        <button type="button" class="mtool" title="缩小" aria-label="缩小" @click="emit('zoom-by', -0.7)">−</button>
-        <button type="button" class="mtool" title="放大" aria-label="放大" @click="emit('zoom-by', 0.7)">+</button>
-        <button type="button" class="mtool" title="复位（双击地图同样复位）" aria-label="复位" @click="emit('reset')">↺</button>
+      <div class="map-tools" role="group" :aria-label="t('forecast.ariaZoom')">
+        <button type="button" class="mtool" :title="t('forecast.zoomOut')" :aria-label="t('forecast.zoomOut')" @click="emit('zoom-by', -0.7)">−</button>
+        <button type="button" class="mtool" :title="t('forecast.zoomIn')" :aria-label="t('forecast.zoomIn')" @click="emit('zoom-by', 0.7)">+</button>
+        <button type="button" class="mtool" :title="t('forecast.resetTitle')" :aria-label="t('forecast.reset')" @click="emit('reset')">↺</button>
         <button
           type="button"
           class="mtool mtool-wide"
-          title="按当前联动视野向 Open-Meteo 重新取场"
+          :title="t('forecast.reloadTitle')"
           @click="requestView"
         >
-          按视野取数
+          {{ t("forecast.reloadView") }}
         </button>
       </div>
     </header>
     <div class="map-stage">
-      <div ref="host" class="map-host" title="单击选格点 · 滚轮缩放 · 拖动平移 · 双击复位"></div>
-      <p class="map-hint">单击选格点 · 滚轮缩放 · 拖动平移 · 双击复位</p>
-      <div v-if="loading" class="map-busy"><span class="apanel-spin" />加载中…</div>
+      <div ref="host" class="map-host" :title="t('forecast.mapHint')"></div>
+      <p class="map-hint">{{ t("forecast.mapHint") }}</p>
+      <div v-if="loading" class="map-busy"><span class="apanel-spin" />{{ t("forecast.loading") }}</div>
     </div>
     <div class="scale">
       <span>{{ minLabel }}</span>
@@ -44,6 +44,7 @@ import {
   type GeoBbox,
   type MapCamera,
 } from "~/composables/useLinkedCamera"
+import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_POSITRON } from "~/utils/mapLabels"
 
 const props = withDefaults(
   defineProps<{
@@ -69,6 +70,7 @@ const emit = defineEmits<{
   "reload-view": [bbox: GeoBbox]
 }>()
 
+const { t, locale } = useI18n()
 const host = ref<HTMLDivElement | null>(null)
 let map: maplibregl.Map | null = null
 let marker: maplibregl.Marker | null = null
@@ -80,7 +82,7 @@ const minLabel = computed(() => (props.field ? `${props.field.min.toFixed(1)}${p
 const maxLabel = computed(() => (props.field ? `${props.field.max.toFixed(1)}${props.field.unit || ""}` : "—"))
 const validLabel = computed(() => beijingShort(props.field?.valid_time))
 const validTitle = computed(() =>
-  props.field?.valid_time ? `有效时刻 ${beijingShort(props.field.valid_time)} 北京时` : "Open-Meteo",
+  props.field?.valid_time ? t("forecast.validTitle", { time: beijingShort(props.field.valid_time) }) : "Open-Meteo",
 )
 
 function snapshot(): MapCamera {
@@ -155,11 +157,17 @@ function requestView() {
   emit("reload-view", currentBbox())
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (!host.value) return
+  let style: string | object = OPENFREEMAP_POSITRON
+  try {
+    style = await loadOpenFreeMapStyle("positron", locale.value)
+  } catch {
+    /* URL fallback + applyPlaceLabels on load */
+  }
   map = new maplibregl.Map({
     container: host.value,
-    style: "https://tiles.openfreemap.org/styles/positron",
+    style: style as never,
     center: props.camera.center,
     zoom: props.camera.zoom,
     bearing: props.camera.bearing,
@@ -185,6 +193,7 @@ onMounted(() => {
     .addTo(map)
 
   map.on("load", () => {
+    applyPlaceLabels(map!, locale.value)
     applyCamera(props.camera)
     paint()
     placeMarker()
@@ -231,6 +240,10 @@ watch(
   () => [props.pick.lat, props.pick.lon],
   () => placeMarker(),
 )
+
+watch(locale, (lang) => {
+  if (map?.isStyleLoaded()) applyPlaceLabels(map, lang)
+})
 
 onBeforeUnmount(() => {
   ro?.disconnect()

@@ -1,7 +1,8 @@
 import type { Map as MlMap } from "maplibre-gl"
+import { applyPlaceLabels, isPlaceLabelLayer, type LabelLang } from "~/utils/mapLabels"
 
 /** Strip streets/POIs and darken water so the globe reads as space + ocean. */
-export function restyleGlobe(map: MlMap) {
+export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
   try {
     map.setProjection({ type: "globe" })
   } catch {
@@ -39,7 +40,18 @@ export function restyleGlobe(map: MlMap) {
     const src = `${id} ${(layer as { "source-layer"?: string })["source-layer"] || ""}`.toLowerCase()
     try {
       if (type === "symbol") {
-        map.setLayoutProperty(id, "visibility", "none")
+        const keep = isPlaceLabelLayer(id, src)
+        map.setLayoutProperty(id, "visibility", keep ? "visible" : "none")
+        if (keep) {
+          try {
+            map.setPaintProperty(id, "text-color", "#d7cfc3")
+            map.setPaintProperty(id, "text-halo-color", "#05070d")
+            map.setPaintProperty(id, "text-halo-width", 1.15)
+            map.setPaintProperty(id, "text-opacity", 0.82)
+          } catch {
+            /* optional */
+          }
+        }
         continue
       }
       if (type === "background") {
@@ -85,6 +97,7 @@ export function restyleGlobe(map: MlMap) {
       /* layer paint mismatch is fine */
     }
   }
+  applyPlaceLabels(map, lang)
 }
 
 export function paintStars(canvas: HTMLCanvasElement, w: number, h: number) {

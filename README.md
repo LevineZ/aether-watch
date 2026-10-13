@@ -2,7 +2,7 @@
 
 International weather + AI observation desk. Multi-model forecast (Open-Meteo), a WebGL ocean-current / wind globe, editorial notes, and an admin path that turns uploaded NetCDF into map fields.
 
-Brand is **AetherWatch** only.
+Brand is **AetherWatch** only. UI language is **Chinese by default**, with a 中/EN toggle (persisted in `localStorage`). Forecast / Earth maps prefer Chinese place names from OpenFreeMap.
 
 ## Quick start
 
@@ -16,7 +16,7 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 | Path | What |
 | --- | --- |
 | `/` | Earth globe — **洋流** particles by default, switchable **风场** / scalar overlays |
-| `/forecast` | Linked-camera model compare (zoom/pan in sync), click-for-series, +0–120h steps |
+| `/forecast` | Linked-camera model compare, Chinese basemap labels, click-for-series, +0–120h steps |
 | `/news` | Seeded Markdown notes |
 | `/feeds` | Ingest / tile actor timeline |
 | `/about` | Stack and data-plane notes |
