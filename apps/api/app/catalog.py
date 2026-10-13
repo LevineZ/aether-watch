@@ -62,6 +62,87 @@ PREVIEW_MODELS: list[dict[str, Any]] = [
 
 PREVIEW_BY_ID = {m["id"]: m for m in PREVIEW_MODELS}
 
+# Open-Meteo Marine Weather API models that actually carry ocean currents.
+CURRENT_MODELS: list[dict[str, Any]] = [
+    {
+        "id": "best_match",
+        "short": "Marine",
+        "name": "Open-Meteo Marine Best Match",
+        "agency": "Open-Meteo",
+        "kind": "currents",
+        "source": "open-meteo-marine",
+        "color": "#1d6a7a",
+        "resolution": "~8 km",
+        "notes": "SMOC / MFWAM blend; free marine-api.open-meteo.com.",
+    },
+    {
+        "id": "meteofrance_currents",
+        "short": "SMOC",
+        "name": "Météo-France SMOC Currents",
+        "agency": "Météo-France",
+        "kind": "currents",
+        "source": "open-meteo-marine",
+        "color": "#0f766e",
+        "resolution": "0.08°",
+        "notes": "Eulerian currents, waves and tides.",
+    },
+]
+CURRENT_BY_ID = {m["id"]: m for m in CURRENT_MODELS}
+
+GLOBE_ELEMENTS: list[dict[str, Any]] = [
+    {
+        "id": "ocean_current",
+        "label": "洋流",
+        "label_en": "Ocean current",
+        "unit": "m/s",
+        "kind": "vector",
+        "endpoint": "currents",
+        "palette": "current",
+        "om": "ocean_current_velocity",
+    },
+    {
+        "id": "wind_speed_10m",
+        "label": "风场",
+        "label_en": "10 m wind",
+        "unit": "m/s",
+        "kind": "vector",
+        "endpoint": "wind",
+        "palette": "wind",
+        "om": "wind_speed_10m",
+    },
+    {
+        "id": "temperature_2m",
+        "label": "气温",
+        "label_en": "2 m temperature",
+        "unit": "°C",
+        "kind": "scalar",
+        "endpoint": "field",
+        "palette": "thermal",
+        "om": "temperature_2m",
+    },
+    {
+        "id": "surface_pressure",
+        "label": "气压",
+        "label_en": "surface pressure",
+        "unit": "hPa",
+        "kind": "scalar",
+        "endpoint": "field",
+        "palette": "pressure",
+        "om": "surface_pressure",
+    },
+    {
+        "id": "precipitation",
+        "label": "降水",
+        "label_en": "hourly precipitation",
+        "unit": "mm",
+        "kind": "scalar",
+        "endpoint": "field",
+        "palette": "rain",
+        "om": "precipitation",
+    },
+]
+GLOBE_ELEMENT_BY_ID = {e["id"]: e for e in GLOBE_ELEMENTS}
+
 ELEMENTS: list[dict[str, Any]] = [
     {
         "id": "temperature_2m",

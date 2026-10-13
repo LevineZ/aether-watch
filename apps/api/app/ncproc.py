@@ -37,7 +37,9 @@ def pick_preview_name(meta: dict[str, Any]) -> str | None:
         name = item["name"]
         score = len(dims)
         lowered = name.lower()
-        if any(k in lowered for k in ("temp", "t2m", "tas", "sst", "air")):
+        if any(k in lowered for k in ("uo", "vo", "current", "ucur", "sst")):
+            score += 12
+        if any(k in lowered for k in ("temp", "t2m", "tas", "air")):
             score += 10
         if any(k in lowered for k in ("wind", "u10", "v10")):
             score += 6
@@ -97,7 +99,9 @@ def _pick_variable(ds: xr.Dataset, preferred: str | None = None) -> str:
             continue
         score = da.ndim
         lowered = name.lower()
-        if any(k in lowered for k in ("temp", "t2m", "tas", "sst")):
+        if any(k in lowered for k in ("uo", "vo", "current", "ucur", "sst")):
+            score += 12
+        if any(k in lowered for k in ("temp", "t2m", "tas")):
             score += 10
         if any(k in lowered for k in ("wind", "u10", "v10")):
             score += 6
@@ -214,6 +218,125 @@ def field_to_json_bytes(field: dict[str, Any]) -> bytes:
     return json.dumps(field, ensure_ascii=False).encode("utf-8")
 
 
+VECTOR_PAIRS: tuple[tuple[str, str], ...] = (
+    ("uo", "vo"),
+    ("uos", "vos"),
+    ("utotal", "vtotal"),
+    ("usurf", "vsurf"),
+    ("u_current", "v_current"),
+    ("ucur", "vcur"),
+    ("eastward_sea_water_velocity", "northward_sea_water_velocity"),
+    ("u10", "v10"),
+    ("u", "v"),
+)
+
+
+def has_vector_vars(variables: list[dict[str, Any]] | None) -> bool:
+    names = {(item.get("name") or "").lower() for item in (variables or [])}
+    for u_name, v_name in VECTOR_PAIRS:
+        if u_name in names and v_name in names:
+            return True
+    return False
+
+
+def pick_vector_pair(ds: xr.Dataset) -> tuple[str, str] | None:
+    lowered = {name.lower(): name for name in ds.data_vars}
+    for u_name, v_name in VECTOR_PAIRS:
+        if u_name in lowered and v_name in lowered:
+            return lowered[u_name], lowered[v_name]
+    return None
+
+
+def extract_vector_field(path: str | Path, step: int = 0) -> dict[str, Any]:
+    """Return a globe-ready u/v grid from an uploaded current or wind NetCDF."""
+    ds = xr.open_dataset(path, decode_times=True, mask_and_scale=True)
+    try:
+        pair = pick_vector_pair(ds)
+        if pair is None:
+            raise ValueError("no eastward/northward current (or wind) pair in dataset")
+        u_name, v_name = pair
+        lat_name = _find_coord(ds, LAT_NAMES)
+        lon_name = _find_coord(ds, LON_NAMES)
+        time_name = _find_coord(ds, TIME_NAMES)
+
+        def _slice(name: str) -> xr.DataArray:
+            da = ds[name]
+            squeeze_dims = [d for d in da.dims if da.sizes[d] == 1]
+            if squeeze_dims:
+                da = da.squeeze(squeeze_dims, drop=True)
+            if time_name and time_name in da.dims:
+                idx = min(max(step, 0), da.sizes[time_name] - 1)
+                da = da.isel({time_name: idx})
+            extra = [d for d in da.dims if d not in {lat_name, lon_name}]
+            for d in extra:
+                da = da.isel({d: 0})
+            return da
+
+        u_da = _slice(u_name)
+        v_da = _slice(v_name)
+        if lat_name is None or lon_name is None:
+            ny, nx = (u_da.shape + (1, 1))[:2]
+            lats = np.linspace(-70, 70, ny).tolist()
+            lons = np.linspace(-180, 180, nx).tolist()
+            u_vals = np.array(u_da.values, dtype=float)
+            v_vals = np.array(v_da.values, dtype=float)
+        else:
+            lat_da = ds[lat_name]
+            lon_da = ds[lon_name]
+            lats = np.array(lat_da.values if lat_da.ndim == 1 else lat_da.values[:, 0], dtype=float).tolist()
+            lons = np.array(lon_da.values if lon_da.ndim == 1 else lon_da.values[0, :], dtype=float).tolist()
+            u_vals = np.array(u_da.values, dtype=float)
+            v_vals = np.array(v_da.values, dtype=float)
+            if u_da.dims and lon_name and u_da.dims[0] == lon_name:
+                u_vals = u_vals.T
+                v_vals = v_vals.T
+        if u_vals.ndim == 1:
+            u_vals = u_vals.reshape(len(lats), len(lons))
+            v_vals = v_vals.reshape(len(lats), len(lons))
+        u_vals, lats, lons = _downsample(u_vals, lats, lons, max_side=96)
+        ny_u, nx_u = u_vals.shape[:2]
+        if v_vals.shape[0] != ny_u or v_vals.shape[1] != nx_u:
+            sy = max(1, math.ceil(v_vals.shape[0] / ny_u))
+            sx = max(1, math.ceil(v_vals.shape[1] / nx_u))
+            v_vals = v_vals[::sy, ::sx][:ny_u, :nx_u]
+        # north → south like Open-Meteo globe grids
+        if len(lats) >= 2 and lats[0] < lats[-1]:
+            lats = list(reversed(lats))
+            u_vals = u_vals[::-1]
+            v_vals = v_vals[::-1]
+        ny, nx = u_vals.shape[:2]
+        bbox = {
+            "west": float(min(lons)),
+            "east": float(max(lons)),
+            "south": float(min(lats)),
+            "north": float(max(lats)),
+        }
+        finite = np.isfinite(u_vals) & np.isfinite(v_vals)
+        u_vals = np.where(finite, u_vals, 0.0)
+        v_vals = np.where(finite, v_vals, 0.0)
+        return {
+            "kind": "currents",
+            "width": nx,
+            "height": ny,
+            "west": bbox["west"],
+            "south": bbox["south"],
+            "east": bbox["east"],
+            "north": bbox["north"],
+            "uMin": round(float(np.min(u_vals)), 3),
+            "uMax": round(float(np.max(u_vals)), 3),
+            "vMin": round(float(np.min(v_vals)), 3),
+            "vMax": round(float(np.max(v_vals)), 3),
+            "u": [round(float(x), 3) for x in u_vals.reshape(-1).tolist()],
+            "v": [round(float(x), 3) for x in v_vals.reshape(-1).tolist()],
+            "source": f"netcdf:{u_name},{v_name}",
+            "cached": False,
+            "filled": int(np.count_nonzero(finite)),
+            "variable": f"{u_name}/{v_name}",
+        }
+    finally:
+        ds.close()
+
+
 def write_temp(data: bytes, suffix: str = ".nc") -> str:
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(data)
@@ -257,6 +380,55 @@ def make_demo_nc() -> bytes:
         t[:] = t2m[None, :, :]
         ds.title = "AetherWatch demo 2 m temperature over China"
         ds.source = "synthetic demo for local NetCDF ingest"
+    data = Path(path).read_bytes()
+    Path(path).unlink(missing_ok=True)
+    return data
+
+
+def make_demo_current_nc() -> bytes:
+    """Tiny Kuroshio-ish uo/vo field so the globe NC current path can be demoed."""
+    import netCDF4 as nc
+
+    lats = np.linspace(5.0, 42.0, 38)
+    lons = np.linspace(110.0, 155.0, 46)
+    lon, lat = np.meshgrid(lons, lats)
+    dx = (lon - 138.0) * np.cos(np.radians(lat))
+    dy = lat - 28.0
+    r = np.sqrt(dx * dx + dy * dy) + 0.4
+    uo = 0.15 + 0.7 * np.exp(-((lat - 30) ** 2) / 90.0) * np.exp(-((lon - 140) ** 2) / 220.0)
+    vo = 0.08 * np.sin(np.radians((lon - 125) * 2)) * np.cos(np.radians(lat))
+    uo += -0.35 * dy / r * np.exp(-r / 10)
+    vo += 0.35 * dx / r * np.exp(-r / 10)
+
+    path = write_temp(b"", suffix=".nc")
+    with nc.Dataset(path, "w", format="NETCDF4") as ds:
+        ds.createDimension("lat", lats.size)
+        ds.createDimension("lon", lons.size)
+        ds.createDimension("time", 1)
+        times = ds.createVariable("time", "f8", ("time",))
+        times.units = "hours since 2026-10-13 00:00:00"
+        times.standard_name = "time"
+        times[:] = [0.0]
+        la = ds.createVariable("lat", "f4", ("lat",))
+        la.units = "degrees_north"
+        la.standard_name = "latitude"
+        la[:] = lats
+        lo = ds.createVariable("lon", "f4", ("lon",))
+        lo.units = "degrees_east"
+        lo.standard_name = "longitude"
+        lo[:] = lons
+        u = ds.createVariable("uo", "f4", ("time", "lat", "lon"), zlib=True)
+        u.units = "m s-1"
+        u.standard_name = "eastward_sea_water_velocity"
+        u.long_name = "Eastward current"
+        u[:] = uo[None, :, :]
+        v = ds.createVariable("vo", "f4", ("time", "lat", "lon"), zlib=True)
+        v.units = "m s-1"
+        v.standard_name = "northward_sea_water_velocity"
+        v.long_name = "Northward current"
+        v[:] = vo[None, :, :]
+        ds.title = "AetherWatch demo ocean currents (Kuroshio-ish)"
+        ds.source = "synthetic demo for local NetCDF current ingest"
     data = Path(path).read_bytes()
     Path(path).unlink(missing_ok=True)
     return data

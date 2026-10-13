@@ -60,6 +60,13 @@ services:
       MINIO_SECURE: "false"
       ADMIN_TOKEN: ${ADMIN_TOKEN:-aether-dev}
       OPEN_METEO_BASE: ${OPEN_METEO_BASE:-https://api.open-meteo.com}
+      OPEN_METEO_MARINE_BASE: ${OPEN_METEO_MARINE_BASE:-https://marine-api.open-meteo.com}
+      FIELD_NX: ${FIELD_NX:-40}
+      FIELD_NY: ${FIELD_NY:-30}
+      CURRENT_NX: ${CURRENT_NX:-24}
+      CURRENT_NY: ${CURRENT_NY:-12}
+      OPEN_METEO_BATCH_SIZE: ${OPEN_METEO_BATCH_SIZE:-40}
+      OPEN_METEO_CONCURRENCY: ${OPEN_METEO_CONCURRENCY:-3}
       NEWS_DIR: /content/news
       GEO_DIR: /content/geo
       CONTENT_DIR: /content
@@ -94,6 +101,13 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-aetherwatch}
       MINIO_SECURE: "false"
       OPEN_METEO_BASE: ${OPEN_METEO_BASE:-https://api.open-meteo.com}
+      OPEN_METEO_MARINE_BASE: ${OPEN_METEO_MARINE_BASE:-https://marine-api.open-meteo.com}
+      FIELD_NX: ${FIELD_NX:-40}
+      FIELD_NY: ${FIELD_NY:-30}
+      CURRENT_NX: ${CURRENT_NX:-24}
+      CURRENT_NY: ${CURRENT_NY:-12}
+      OPEN_METEO_BATCH_SIZE: ${OPEN_METEO_BATCH_SIZE:-40}
+      OPEN_METEO_CONCURRENCY: ${OPEN_METEO_CONCURRENCY:-3}
       NEWS_DIR: /content/news
       GEO_DIR: /content/geo
       CONTENT_DIR: /content

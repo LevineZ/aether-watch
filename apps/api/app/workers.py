@@ -28,7 +28,7 @@ class ForecastIngestActor:
     @broker.task(task_name="forecast_ingest")
     async def run(force: bool = False) -> dict:
         from app.catalog import CHINA_BBOX, DEFAULT_POINT, PREVIEW_MODELS
-        from app.openmeteo import fetch_field, fetch_series, fetch_wind_grid
+        from app.openmeteo import fetch_current_grid, fetch_field, fetch_series, fetch_wind_grid
 
         models = [m["id"] for m in PREVIEW_MODELS[:3]]
         summary: dict = {"actor": "ForecastIngestActor", "ok": [], "errors": {}}
@@ -38,8 +38,15 @@ class ForecastIngestActor:
         except Exception as exc:
             summary["errors"]["series"] = str(exc)
         try:
-            await fetch_field(models[0], "temperature_2m", CHINA_BBOX, nx=8, ny=6, step=0)
-            summary["ok"].append("field:gfs:t2m")
+            await fetch_field(
+                models[0],
+                "temperature_2m",
+                CHINA_BBOX,
+                nx=settings.field_nx,
+                ny=settings.field_ny,
+                step=0,
+            )
+            summary["ok"].append(f"field:gfs:t2m:{settings.field_nx}x{settings.field_ny}")
         except Exception as exc:
             summary["errors"]["field"] = str(exc)
         try:
@@ -47,6 +54,11 @@ class ForecastIngestActor:
             summary["ok"].append("wind:gfs")
         except Exception as exc:
             summary["errors"]["wind"] = str(exc)
+        try:
+            await fetch_current_grid("best_match")
+            summary["ok"].append("currents:marine")
+        except Exception as exc:
+            summary["errors"]["currents"] = str(exc)
 
         await _activity("ingest", "预报缓存刷新", json.dumps(summary, ensure_ascii=False)[:800], summary)
         return summary
