@@ -16,9 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.catalog import (
     CHINA_BBOX,
+    CURRENT_BY_ID,
+    CURRENT_MODELS,
     DEFAULT_POINT,
     ELEMENT_BY_ID,
     ELEMENTS,
+    GLOBE_ELEMENTS,
     PREVIEW_BY_ID,
     PREVIEW_MODELS,
 )
@@ -26,6 +29,7 @@ from app.config import settings
 from app.db import Activity, Dataset, SessionLocal, get_session, init_db
 from app.news import get_article, list_articles
 from app import ncproc, openmeteo, storage
+from app.landmask import apply_ocean_mask
 from app.workers import ForecastIngestActor, NcIngestActor, broker
 
 logging.basicConfig(level=logging.INFO)
@@ -155,11 +159,18 @@ async def catalog(session: AsyncSession = Depends(get_session)) -> dict[str, Any
                 "dims": row.dims,
                 "bbox": row.bbox,
                 "preview_variable": row.preview_variable,
+                "has_vector": ncproc.has_vector_vars(row.variables if isinstance(row.variables, list) else None),
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "error_message": row.error_message,
             }
         )
-    return {"models": PREVIEW_MODELS, "elements": ELEMENTS, "datasets": datasets}
+    return {
+        "models": PREVIEW_MODELS,
+        "elements": ELEMENTS,
+        "datasets": datasets,
+        "globe_elements": GLOBE_ELEMENTS,
+        "current_models": CURRENT_MODELS,
+    }
 
 
 @app.get("/api/series")
@@ -187,8 +198,8 @@ async def field(
     east: float | None = None,
     north: float | None = None,
     step: int = 0,
-    nx: int = Query(10, ge=4, le=16),
-    ny: int = Query(7, ge=4, le=12),
+    nx: int | None = Query(None, ge=4, le=48),
+    ny: int | None = Query(None, ge=4, le=36),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     bbox = {
@@ -201,7 +212,14 @@ async def field(
         return await _nc_field(session, model[3:], step)
     if variable not in ELEMENT_BY_ID:
         raise HTTPException(400, f"unknown variable {variable}")
-    return await openmeteo.fetch_field(model, variable, bbox, nx=nx, ny=ny, step=step)
+    return await openmeteo.fetch_field(
+        model,
+        variable,
+        bbox,
+        nx=nx or settings.field_nx,
+        ny=ny or settings.field_ny,
+        step=step,
+    )
 
 
 @app.get("/api/compare")
@@ -217,7 +235,11 @@ async def compare(
         if mid.startswith("nc:"):
             grids.append(await _nc_field(session, mid[3:], step))
         else:
-            grids.append(await openmeteo.fetch_field(mid, variable, CHINA_BBOX, nx=8, ny=6, step=step))
+            grids.append(
+                await openmeteo.fetch_field(
+                    mid, variable, CHINA_BBOX, nx=settings.field_nx, ny=settings.field_ny, step=step
+                )
+            )
     return {"variable": variable, "step": step, "grids": grids}
 
 
@@ -240,6 +262,26 @@ async def wind(model: str = Query("gfs_seamless")) -> dict[str, Any]:
     except Exception as exc:
         log.warning("wind live fetch failed: %s", exc)
         return openmeteo.synthetic_wind(20, 10, {"west": -180, "south": -70, "east": 180, "north": 70})
+
+
+@app.get("/api/currents")
+async def currents(
+    model: str = Query("best_match"),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    if model.startswith("nc:"):
+        return await _nc_vector(session, model[3:])
+    if model not in CURRENT_BY_ID:
+        model = "best_match"
+    try:
+        return await openmeteo.fetch_current_grid(model)
+    except Exception as exc:
+        log.warning("current live fetch failed: %s", exc)
+        return openmeteo.synthetic_currents(
+            settings.current_nx,
+            settings.current_ny,
+            {"west": -180, "south": -70, "east": 180, "north": 70},
+        )
 
 
 @app.get("/api/news")
@@ -370,6 +412,24 @@ async def seed_demo_nc(
     return {"id": dataset_id, "filename": name, "status": "uploaded", "bytes": len(data)}
 
 
+@app.post("/api/admin/datasets/demo-currents")
+async def seed_demo_current_nc(
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    _admin(x_admin_token)
+    data = ncproc.make_demo_current_nc()
+    dataset_id = str(uuid.uuid4())
+    name = "demo_uo_kuroshio.nc"
+    key = f"raw/{dataset_id}/{name}"
+    storage.put_bytes(key, data, "application/x-netcdf")
+    row = Dataset(id=dataset_id, filename=name, status="uploaded", minio_key=key)
+    session.add(row)
+    await session.commit()
+    await NcIngestActor.run.kiq(dataset_id)
+    return {"id": dataset_id, "filename": name, "status": "uploaded", "bytes": len(data)}
+
+
 @app.get("/api/admin/datasets")
 async def list_datasets(
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
@@ -392,6 +452,28 @@ async def list_datasets(
             }
         )
     return {"datasets": items}
+
+
+async def _nc_vector(session: AsyncSession, dataset_id: str, step: int = 0) -> dict[str, Any]:
+    row = await session.get(Dataset, dataset_id)
+    if row is None:
+        raise HTTPException(404, "dataset not found")
+    if row.status not in {"ready", "parsed"}:
+        raise HTTPException(409, f"dataset not ready ({row.status})")
+    try:
+        raw = storage.get_bytes(row.minio_key)
+        tmp = ncproc.write_temp(raw, suffix=".nc")
+        try:
+            return apply_ocean_mask(ncproc.extract_vector_field(tmp, step=step))
+        finally:
+            from pathlib import Path
+
+            Path(tmp).unlink(missing_ok=True)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        log.warning("nc vector extract: %s", exc)
+        raise HTTPException(500, f"vector extract failed: {exc}") from exc
 
 
 async def _nc_field(session: AsyncSession, dataset_id: str, step: int) -> dict[str, Any]:

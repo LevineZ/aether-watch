@@ -38,10 +38,11 @@
         <strong>+{{ step * 6 }}h</strong>
       </div>
       <div class="map-grid">
-        <ClientOnly v-for="id in mapsToShow" :key="id">
+        <ClientOnly v-for="id in mapsToShow" :key="`${id}:${variable}:${step}`">
           <FieldMap
+            :key="`${id}:${variable}:${step}`"
             :title="labelOf(id)"
-            :field="fields[id] || null"
+            :field="(fields[id] as never) || null"
             :palette="palette"
           />
         </ClientOnly>

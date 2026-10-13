@@ -23,6 +23,7 @@
         <p v-if="message" class="banner">{{ message }}</p>
         <div style="margin-top:0.8rem;display:flex;gap:.5rem;flex-wrap:wrap">
           <button class="btn" :disabled="busy" type="button" @click="demo">生成演示 NetCDF</button>
+          <button class="ghost" :disabled="busy" type="button" @click="demoCurrents">生成演示洋流 NetCDF</button>
           <button class="ghost" type="button" @click="refresh">刷新列表</button>
         </div>
       </section>
@@ -126,6 +127,21 @@ async function demo() {
     setTimeout(refresh, 2500)
   } catch (e: unknown) {
     message.value = e instanceof Error ? e.message : "演示生成失败"
+  } finally {
+    busy.value = false
+  }
+}
+
+async function demoCurrents() {
+  busy.value = true
+  message.value = "正在生成演示洋流场…"
+  try {
+    const res = await api.post<{ filename: string }>("/api/admin/datasets/demo-currents", token.value)
+    message.value = `已写入 ${res.filename}。就绪后可在地球页洋流模式中选用。`
+    await refresh()
+    setTimeout(refresh, 2500)
+  } catch (e: unknown) {
+    message.value = e instanceof Error ? e.message : "演示洋流生成失败"
   } finally {
     busy.value = false
   }

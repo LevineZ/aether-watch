@@ -6,13 +6,14 @@
         <p>
           AetherWatch 是一座本地可运行的观测台：一边用公开数值预报对照 GFS、IFS、AIFS 等模式，
           一边让管理员把客户的 NetCDF 场文件送进同一套目录与地图。地球页用 WebGL / MapLibre 球体
-          加上粒子风场；预报页用暖纸页来对照空间场和时间序列；资讯页用 Markdown 写科学笔记。
+          加上洋流 / 风场粒子；预报页用暖纸页来对照空间场和时间序列；资讯页用 Markdown 写科学笔记。
         </p>
         <h2>数据平面</h2>
         <p>
           <strong>预览（无需上传）</strong>走 Open-Meteo 免费预报 API（非商业、无需密钥）：点上序列是真实网络请求；
-          中国范围的空间场是对 Open-Meteo 的粗网格采样并在浏览器里上采样着色。10 米风场同样来自 Open-Meteo，
-          编码成 u/v 网格驱动地球页粒子。
+          中国范围的空间场默认按约 40×30 点采样（可用 <code>FIELD_NX</code> / <code>FIELD_NY</code> 调节）。
+          地球页默认洋流来自 Open-Meteo Marine（<code>ocean_current_velocity/direction</code>），风场仍是 10 米 u/v；
+          两者都可在地球页切换。公开源失败时会回落到标注了「合成场」的程序场。
         </p>
         <p>
           <strong>客户 NetCDF</strong>由管理页上传 <code>.nc</code> / <code>.nc4</code>，写入 MinIO，
