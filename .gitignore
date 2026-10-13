@@ -1,0 +1,40 @@
+# env & secrets
+.env
+.env.local
+*.pem
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# node / nuxt
+node_modules/
+.nuxt/
+.output/
+dist/
+.cache/
+
+# docker volumes / local data
+data/
+.minio/
+postgres-data/
+
+# os / ide
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# agent leftovers
+agent-tools/
+uploads/
+*.log
+.playwright-mcp/
+artifacts/
