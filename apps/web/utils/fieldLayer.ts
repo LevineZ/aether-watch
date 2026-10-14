@@ -164,7 +164,7 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     this.visible = !!field
     const gl = this.gl
     if (!gl) {
-      this._pending = field && palette ? { field, palette } : null
+      this._pending = field && palette ? { field, palette, opts } : null
       this.map?.triggerRepaint()
       return
     }
@@ -191,7 +191,11 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     this.map?.triggerRepaint()
   }
 
-  private _pending: { field: ScalarField; palette: Palette } | null = null
+  private _pending: {
+    field: ScalarField
+    palette: Palette
+    opts?: { signalAlpha?: boolean; opacity?: number }
+  } | null = null
 
   onAdd(map: MlMap, gl: WebGL2RenderingContext) {
     this.map = map
@@ -201,7 +205,7 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     this.gridTex = gl.createTexture()
     this.cmapTex = gl.createTexture()
     if (this._pending) {
-      this.setField(this._pending.field, this._pending.palette)
+      this.setField(this._pending.field, this._pending.palette, this._pending.opts)
       this._pending = null
     }
   }

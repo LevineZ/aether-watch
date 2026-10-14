@@ -26,6 +26,13 @@ class RetryWaitTest(unittest.TestCase):
         self.assertEqual(retry_wait_seconds(1, "99", base=2.0, cap=45.0, jitter=False), 45.0)
         self.assertEqual(retry_wait_seconds(1, "nope", base=2.0, cap=45.0, jitter=False), 2.0)
 
+    def test_default_cap_clips_retry_after(self):
+        from app.config import settings
+        from app.openmeteo import retry_wait_seconds
+
+        self.assertLessEqual(settings.open_meteo_backoff_cap_seconds, 8.0)
+        self.assertEqual(retry_wait_seconds(1, "99", jitter=False), settings.open_meteo_backoff_cap_seconds)
+
 
 class GatherBatchesTest(unittest.TestCase):
     def test_sequential_and_capped_batch(self):
@@ -46,6 +53,22 @@ class GatherBatchesTest(unittest.TestCase):
         self.assertEqual(len(out), 130)
         self.assertEqual(seen, [48, 48, 34])
         self.assertTrue(all(p and p.get("ok") for p in out))
+
+    def test_rate_limit_stops_remaining_batches(self):
+        from app import openmeteo
+
+        calls = {"n": 0}
+
+        async def chunk(_pts):
+            calls["n"] += 1
+            raise openmeteo.OpenMeteoRateLimit("open-meteo 429")
+
+        async def run():
+            with self.assertRaises(openmeteo.OpenMeteoRateLimit):
+                await openmeteo._gather_batches([(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)], chunk, batch_size=1)
+
+        asyncio.run(run())
+        self.assertEqual(calls["n"], 1)
 
 
 class ChinaGeoTest(unittest.TestCase):
@@ -77,6 +100,12 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertLessEqual(settings.current_ny, 12)
         self.assertLessEqual(settings.wind_nx, 24)
         self.assertLessEqual(settings.wind_ny, 12)
+        self.assertEqual(settings.globe_field_nx, 16)
+        self.assertEqual(settings.globe_field_ny, 10)
+        self.assertLessEqual(settings.wave_nx, 16)
+        self.assertLessEqual(settings.wave_ny, 10)
+        self.assertLessEqual(settings.open_meteo_max_retries, 3)
+        self.assertLessEqual(settings.open_meteo_backoff_cap_seconds, 12.0)
 
     def test_borders_are_solid_guanchao_not_css_dash(self):
         text = (REPO / "apps" / "web" / "utils" / "chinaBorders.ts").read_text(encoding="utf-8")
@@ -97,6 +126,8 @@ class ChinaGeoTest(unittest.TestCase):
         scripts = [
             REPO / "apps" / "web" / "utils" / "interp.test.ts",
             REPO / "apps" / "web" / "utils" / "flowSegment.test.ts",
+            REPO / "apps" / "web" / "utils" / "globeOverlay.test.ts",
+            REPO / "apps" / "web" / "utils" / "globeStyle.test.ts",
             REPO / "apps" / "web" / "utils" / "currentSheet.test.ts",
         ]
         result = subprocess.run(
@@ -150,9 +181,11 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertIn("MAX_MERCATOR_WRAP", seg)
         self.assertIn("MIN_COSC_CURRENT", seg)
         forecast = (REPO / "apps" / "web" / "pages" / "forecast.vue").read_text(encoding="utf-8")
-        self.assertIn("COARSE_NX", forecast)
+        self.assertNotIn("COARSE_NX", forecast)
         self.assertIn("Promise.all", forecast)
-        self.assertIn("fetchFieldBackoff", forecast)
+        self.assertIn("pageBusy", forecast)
+        self.assertIn("fieldPending", forecast)
+        self.assertNotIn("fetchFieldBackoff", forecast)
         fmap = (REPO / "apps" / "web" / "components" / "FieldMap.vue").read_text(encoding="utf-8")
         self.assertIn("raster-opacity", fmap)
         self.assertIn("forecast.bjt", fmap)

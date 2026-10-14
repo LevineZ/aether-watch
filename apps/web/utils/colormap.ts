@@ -1,4 +1,4 @@
-export type Palette = "thermal" | "wind" | "rain" | "humidity" | "pressure" | "cloud" | "current"
+export type Palette = "thermal" | "wind" | "rain" | "humidity" | "pressure" | "cloud" | "current" | "waves"
 
 function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t
@@ -11,8 +11,9 @@ function hexToRgb(hex: string): [number, number, number] {
 
 const STOPS: Record<Palette, string[]> = {
   thermal: ["#1b2a4a", "#2f5f86", "#4f93b8", "#98d0d4", "#f3f6e8", "#f6c07a", "#d96a28", "#9a2f0c"],
-  wind: ["#081530", "#0e4a88", "#1a9a68", "#8ed830", "#f0e850", "#fff6d0"],
+  wind: ["#081428", "#0c3f9a", "#1488c8", "#14b45a", "#c8dc14", "#f0c020", "#e05018"],
   current: ["#041828", "#0a4a78", "#14a0b0", "#3ee0c8", "#a8fff0"],
+  waves: ["#08143c", "#0c4aa8", "#1490c0", "#1ab050", "#c8d414", "#f08a14", "#d42818", "#8a1030"],
   rain: ["#f7f4ee", "#dceee4", "#9dcec2", "#4e9aa0", "#1c6274", "#0b3b4a"],
   humidity: ["#f4e4c1", "#d5dda8", "#8fbe90", "#4a8a7a", "#2a5c58", "#1b3b40"],
   pressure: ["#4a1f5c", "#6d5aa4", "#c8c4dc", "#f7f4ee", "#e8b56a", "#b85a1c"],

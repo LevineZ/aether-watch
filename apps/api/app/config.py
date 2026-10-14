@@ -55,13 +55,21 @@ class Settings(BaseSettings):
     # Live wind stays coarse; the globe bilinear-upsamples. Raise only with quota.
     wind_nx: int = 20
     wind_ny: int = 10
+    # Globe scalar overlays (气温/气压/降水). Matches Earth page −180…180/−70…70, 16×10.
+    # One OM pass fills all three; do not raise live.
+    globe_field_nx: int = 16
+    globe_field_ny: int = 10
+    # Wave-period underlay. Prefer piggyback on OM marine currents; dedicated fetch stays coarse.
+    wave_nx: int = 12
+    wave_ny: int = 6
     # Conservative Open-Meteo pacing. Keep concurrency=1 and leave gaps.
     open_meteo_batch_size: int = 40
     open_meteo_concurrency: int = 1
     open_meteo_min_interval_seconds: float = 0.75
-    open_meteo_max_retries: int = 6
+    # Short 429 loop: two attempts, cap 8s, then last-good. Do not sit on Retry-After for minutes.
+    open_meteo_max_retries: int = 2
     open_meteo_backoff_base: float = 2.0
-    open_meteo_backoff_cap_seconds: float = 45.0
+    open_meteo_backoff_cap_seconds: float = 8.0
 
 
 settings = Settings()

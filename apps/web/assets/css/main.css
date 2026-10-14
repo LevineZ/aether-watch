@@ -531,10 +531,33 @@ img { max-width: 100%; }
 .earth-nav nav { display: flex; align-items: center; flex-wrap: wrap; gap: 0.15rem 0.2rem; }
 .earth-nav a { opacity: 0.78; margin-right: 1rem; font-size: 0.92rem; }
 .earth-nav a.active, .earth-nav a:hover { opacity: 1; }
+.earth-dock {
+  position: absolute;
+  left: 1.1rem;
+  bottom: 0.72rem;
+  z-index: 6;
+  min-width: 3.4rem;
+  padding: 0.18rem 0.55rem 0.22rem;
+  border: 0;
+  background: transparent;
+  color: #d7cfc3;
+  font-family: var(--font-serif, Georgia, serif);
+  font-size: 1.05rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
+  opacity: 0.88;
+}
+.earth-dock:hover,
+.earth-dock:focus-visible {
+  opacity: 1;
+  color: #fff8ee;
+  outline: none;
+}
 .earth-panel {
   position: absolute;
   left: 1.1rem;
-  bottom: 1.1rem;
+  bottom: 2.55rem;
   z-index: 5;
   width: min(22rem, calc(100vw - 2rem));
   background: rgba(8, 12, 18, 0.78);
@@ -544,6 +567,30 @@ img { max-width: 100%; }
   border-radius: 16px;
   padding: 0.9rem 1rem 1rem;
   box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+}
+.earth-panel-close {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.5rem;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #c9c0b4;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.earth-panel-close:hover,
+.earth-panel-close:focus-visible {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+.earth-panel .chip.quiet {
+  pointer-events: none;
+  opacity: 0.72;
 }
 .earth-panel .legend {
   display: flex;

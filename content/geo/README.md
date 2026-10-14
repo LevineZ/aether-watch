@@ -10,3 +10,5 @@ Forecast and Earth maps overlay `china-prc.geojson` (also copied to `apps/web/pu
 Do **not** substitute Natural Earth admin-0 here: it treats Taiwan as a separate country and omits the dash line.
 
 `china-bounds.json` is only the default view bbox (73–135°E, 3–54°N), not the legal outline.
+
+`ne-110m-land.geojson` is Natural Earth 110m land (public domain), copied to `apps/web/public/geo/` for the Earth globe fill. OpenFreeMap's dark style paints continents as the **background** color; the globe restyle used to set that to space-black, which looked like missing tiles over China / SE Asia. The globe now fills land from this file (`/geo/ne-110m-land.geojson`, then `/api/geo/ne-110m-land.json`) and keeps the background as ocean. **Do not** use it for PRC borders — see `china-prc.geojson` above.

@@ -116,10 +116,14 @@ GLOBE_ELEMENTS: list[dict[str, Any]] = [
         "id": "ocean_current",
         "label": "洋流",
         "label_en": "Ocean current",
-        "unit": "m/s",
+        "unit": "s",
         "kind": "vector",
         "endpoint": "currents",
-        "palette": "current",
+        "palette": "waves",
+        "overlay": "waves",
+        "overlay_unit": "s",
+        "overlay_label": "波周期",
+        "overlay_label_en": "wave period",
         "om": "ocean_current_velocity",
     },
     {
@@ -238,5 +242,16 @@ ELEMENT_BY_ID = {e["id"]: e for e in ELEMENTS}
 CHINA_BBOX = {"west": 73.0, "south": 3.0, "east": 135.0, "north": 54.0}
 CHINA_SEAS_BBOX = {"west": 105.0, "south": 3.0, "east": 132.0, "north": 41.0}
 GLOBAL_BBOX = {"west": -180.0, "south": -78.0, "east": 180.0, "north": 78.0}
+# Globe overlays stay a bit inside the poles so mercator mesh / Open-Meteo stay stable.
+GLOBE_BBOX = {"west": -180.0, "south": -70.0, "east": 180.0, "north": 70.0}
+GLOBE_SCALAR_VARS = ("temperature_2m", "surface_pressure", "precipitation")
 
 DEFAULT_POINT = {"name": "北京", "name_en": "Beijing", "lat": 39.9042, "lon": 116.4074}
+
+
+def weather_model_id(model: str | None) -> str:
+    """Map globe chips onto an Open-Meteo forecast model. Marine ids are not valid here."""
+    raw = (model or "").strip()
+    if raw in PREVIEW_BY_ID:
+        return raw
+    return "gfs_seamless"

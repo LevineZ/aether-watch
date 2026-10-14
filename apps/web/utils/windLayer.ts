@@ -836,10 +836,10 @@ void main() {
   float t = clamp(v_speed / max(u_vmax, 0.05), 0.0, 1.0);
   vec3 col;
   if (u_kind > 0.5) {
-    vec3 c1 = vec3(0.10, 0.52, 0.70);
-    vec3 c2 = vec3(0.20, 0.82, 0.88);
-    vec3 c3 = vec3(0.55, 0.96, 0.92);
-    vec3 c4 = vec3(0.82, 0.99, 0.96);
+    vec3 c1 = vec3(0.78, 0.90, 0.96);
+    vec3 c2 = vec3(0.90, 0.97, 0.98);
+    vec3 c3 = vec3(0.97, 0.99, 0.94);
+    vec3 c4 = vec3(1.00, 0.98, 0.88);
     col = t < 0.4 ? mix(c1, c2, t / 0.4)
         : t < 0.75 ? mix(c2, c3, (t - 0.4) / 0.35)
         : mix(c3, c4, (t - 0.75) / 0.25);
