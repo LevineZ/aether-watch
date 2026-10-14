@@ -94,9 +94,12 @@ class ChinaGeoTest(unittest.TestCase):
     def test_interp_helpers_bilinear(self):
         import subprocess
 
-        script = REPO / "apps" / "web" / "utils" / "interp.test.ts"
+        scripts = [
+            REPO / "apps" / "web" / "utils" / "interp.test.ts",
+            REPO / "apps" / "web" / "utils" / "flowSegment.test.ts",
+        ]
         result = subprocess.run(
-            ["node", "--experimental-strip-types", "--test", str(script)],
+            ["node", "--experimental-strip-types", "--test", *[str(s) for s in scripts]],
             check=False,
             capture_output=True,
             text=True,
@@ -124,7 +127,15 @@ class ChinaGeoTest(unittest.TestCase):
         match = __import__("re").search(r"const CURRENT_STEP = ([0-9.]+)", layer)
         self.assertIsNotNone(match)
         self.assertGreaterEqual(float(match.group(1)), 0.2)
+        self.assertLessEqual(float(match.group(1)), 0.32)
         self.assertIn("u_width", layer)
+        self.assertIn("MAX_NDC", layer)
+        self.assertIn("v_keep", layer)
+        self.assertIn("currentSegmentOk", layer)
+        self.assertIn("return 1.22 * zoomMul", layer)
+        seg = (REPO / "apps" / "web" / "utils" / "flowSegment.ts").read_text(encoding="utf-8")
+        self.assertIn("MAX_MERCATOR_WRAP", seg)
+        self.assertIn("MIN_COSC_CURRENT", seg)
 
 
 if __name__ == "__main__":

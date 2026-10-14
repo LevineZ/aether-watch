@@ -57,7 +57,7 @@ function paintOverlay() {
     const speed = windSpeedField(props.flow, { oceanOnly: kind === "current" })
     scalarLayer.setField(speed, kind === "current" ? "current" : "wind", {
       signalAlpha: false,
-      opacity: kind === "current" ? 0.58 : 0.62,
+      opacity: kind === "current" ? 0.36 : 0.62,
     })
     layer?.setVisible(true)
   } else {

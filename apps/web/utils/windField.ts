@@ -120,15 +120,15 @@ export function mercatorY(lat: number) {
 }
 
 /**
- * Ribbon coverage, not 1px-dot count. Long faded trails read dense at ~8–12k particles;
- * 40k+ GL_LINES still looked like specks at default globe framing.
+ * Sheet coverage for thin faded trails. Currents want more overlap so the field
+ * reads as nullschool streamlines rather than sparse tubes; wind stays a bit sparser.
  */
 export function targetParticleCount(width: number, dpr: number, kind: "wind" | "current" = "wind") {
-  const bias = kind === "current" ? 1.28 : 1.05
-  if (width < 720) return Math.round(8000 * bias)
-  if (width < 1100) return Math.round(10500 * bias)
-  if (dpr > 1.6) return Math.round(12000 * bias)
-  return Math.round(13500 * bias)
+  const bias = kind === "current" ? 1.55 : 1.05
+  if (width < 720) return Math.round(9000 * bias)
+  if (width < 1100) return Math.round(12000 * bias)
+  if (dpr > 1.6) return Math.round(14000 * bias)
+  return Math.round(16000 * bias)
 }
 
 /** Client-side speed scalar from the same u/v grid (no extra Open-Meteo fetch). */
