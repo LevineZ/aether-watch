@@ -2,13 +2,16 @@ import type { Map as MlMap } from "maplibre-gl"
 
 export const CHINA_PRC_GEO_URLS = ["/geo/china-prc.geojson", "/api/geo/china-prc.json"] as const
 
-export const PRC_LAYER_IDS = [
-  "prc-land-fill",
-  "prc-land-case",
-  "prc-dash-case",
-  "prc-land-line",
-  "prc-dash-line",
-] as const
+/** Visible PRC overlays. Legacy case/fill ids are hidden if a prior style left them. */
+export const PRC_LAYER_IDS = ["prc-land-line", "prc-dash-line"] as const
+const LEGACY_PRC_IDS = ["prc-land-fill", "prc-land-case", "prc-dash-case"] as const
+
+/** 观潮 earth.css `boundary-nation` — solid orange, not a CSS dasharray. */
+export const GLOBE_NATION = "rgba(255,186,92,0.95)"
+export const GLOBE_PROVINCE = "rgba(255,186,92,0.88)"
+/** Forecast panels: thick dark solid national stroke. */
+export const PAPER_NATION = "#161616"
+export const PAPER_PROVINCE = "#3a3a3a"
 
 type GeoFC = { type: string; features: Array<{ properties?: Record<string, unknown> | null; geometry?: unknown }> }
 
@@ -43,16 +46,41 @@ export async function loadChinaPrcGeo(): Promise<GeoFC | null> {
   }
 }
 
+export type BoundaryRole = "mute" | "province" | null
+
+/** Country / disputed OSM lines are muted; admin-1+ stay for 观潮-like province mesh. */
+export function classifyBoundaryLayer(id: string, sourceLayer = ""): BoundaryRole {
+  const s = `${id} ${sourceLayer}`.toLowerCase()
+  if (!s.includes("bound") && !s.includes("admin") && !s.includes("disput")) return null
+  if (s.includes("disput") || s.includes("claimed")) return "mute"
+  if (s.includes("country") || /boundary_2([^0-9]|$)/.test(s) || s.includes("admin_0") || s.includes("admin0")) {
+    return "mute"
+  }
+  if (
+    s.includes("boundary_3") ||
+    s.includes("boundary_state") ||
+    s.includes("province") ||
+    s.includes("boundary_4") ||
+    s.includes("admin_1") ||
+    s.includes("admin1")
+  ) {
+    return "province"
+  }
+  if (s.includes("bound") || s.includes("admin")) return "mute"
+  return null
+}
+
 /**
- * Hide OSM/OpenFreeMap admin lines that depict Taiwan as a separate country
- * or omit the mainland standard-map dash line. Coastlines and place labels stay.
+ * Hide OSM/OpenFreeMap country lines that depict Taiwan as a separate country
+ * or omit the mainland standard-map dash line. Province / prefecture lines stay.
  */
 export function muteOsmCountryBoundaries(map: MlMap) {
   const layers = map.getStyle()?.layers || []
   for (const layer of layers) {
     if (layer.type !== "line") continue
-    const src = `${layer.id} ${(layer as { "source-layer"?: string })["source-layer"] || ""}`.toLowerCase()
-    if (src.includes("bound") || src.includes("admin") || src.includes("disputed")) {
+    const src = (layer as { "source-layer"?: string })["source-layer"] || ""
+    const role = classifyBoundaryLayer(layer.id, src)
+    if (role === "mute") {
       try {
         map.setLayoutProperty(layer.id, "visibility", "none")
       } catch {
@@ -64,54 +92,67 @@ export function muteOsmCountryBoundaries(map: MlMap) {
 
 type BorderTheme = "paper" | "globe"
 
-type ThemePaint = {
-  fill: string
-  fillOpacity: number
-  case: string
-  land: string
-  dash: string
-  landWidth: unknown
-  dashWidth: unknown
-  caseWidth: unknown
-  dashCaseWidth: unknown
-  dasharray: number[]
-}
+const zoomWidth = (stops: Array<[number, number]>) =>
+  ["interpolate", ["linear"], ["zoom"], ...stops.flat()] as unknown
 
-const zoomWidth = (z1: number, z3: number, z6: number) =>
-  ["interpolate", ["linear"], ["zoom"], 1, z1, 3, z3, 6, z6] as unknown
-
-const THEME: Record<BorderTheme, ThemePaint> = {
+const THEME = {
   paper: {
-    fill: "#c1440e",
-    fillOpacity: 0.07,
-    case: "#fff6e4",
-    land: "#c1440e",
-    dash: "#e07a14",
-    landWidth: zoomWidth(2.15, 3.15, 4.4),
-    dashWidth: zoomWidth(2.55, 3.7, 5.1),
-    caseWidth: zoomWidth(4.4, 6.2, 8.2),
-    dashCaseWidth: zoomWidth(5.0, 7.0, 9.2),
-    dasharray: [2.5, 1.75],
+    land: PAPER_NATION,
+    dash: PAPER_NATION,
+    province: PAPER_PROVINCE,
+    landWidth: zoomWidth([
+      [2, 1.85],
+      [3, 2.05],
+      [6, 2.45],
+    ]),
+    dashWidth: zoomWidth([
+      [2, 1.7],
+      [3, 1.95],
+      [6, 2.3],
+    ]),
+    provinceWidth: zoomWidth([
+      [2, 0.55],
+      [3.2, 0.75],
+      [6, 1.05],
+      [8, 1.25],
+    ]),
+    landOpacity: 1,
+    dashOpacity: 1,
+    provinceOpacity: 0.88,
+    provinceMinZoom: 1.9,
   },
   globe: {
-    fill: "#f6d27a",
-    fillOpacity: 0.1,
-    case: "#1a0c04",
-    land: "#ffd56a",
-    dash: "#ffe9a8",
-    landWidth: zoomWidth(2.4, 3.4, 4.8),
-    dashWidth: zoomWidth(2.9, 4.1, 5.6),
-    caseWidth: zoomWidth(5.0, 6.8, 9.0),
-    dashCaseWidth: zoomWidth(5.6, 7.6, 10.2),
-    dasharray: [2.4, 1.7],
+    land: GLOBE_NATION,
+    dash: GLOBE_NATION,
+    province: GLOBE_PROVINCE,
+    landWidth: zoomWidth([
+      [1, 1.25],
+      [3, 1.4],
+      [6, 1.7],
+    ]),
+    dashWidth: zoomWidth([
+      [1, 1.25],
+      [3, 1.4],
+      [6, 1.65],
+    ]),
+    provinceWidth: zoomWidth([
+      [1.4, 0.7],
+      [3, 1.15],
+      [5, 1.65],
+      [6, 1.85],
+    ]),
+    landOpacity: 0.95,
+    dashOpacity: 0.95,
+    provinceOpacity: 0.9,
+    provinceMinZoom: 2.05,
   },
-}
+} as const
 
 export function firstPrcLayerId(map: MlMap): string | undefined {
   return PRC_LAYER_IDS.find((id) => map.getLayer(id))
 }
 
-/** Keep the dashed PRC outline + 十段线 above heatmaps / particles. */
+/** Keep the solid PRC outline + 十段线 above heatmaps / particles. */
 export function raiseChinaBorders(map: MlMap) {
   for (const id of PRC_LAYER_IDS) {
     if (map.getLayer(id)) {
@@ -124,19 +165,24 @@ export function raiseChinaBorders(map: MlMap) {
   }
 }
 
-function setLinePaint(
-  map: MlMap,
-  id: string,
-  color: string,
-  width: unknown,
-  opacity: number,
-  dasharray?: number[],
-) {
+function clearDasharray(map: MlMap, id: string) {
+  try {
+    map.setPaintProperty(id, "line-dasharray", undefined as never)
+  } catch {
+    try {
+      map.setPaintProperty(id, "line-dasharray", [1, 0] as never)
+    } catch {
+      /* some styles reject both */
+    }
+  }
+}
+
+function setLinePaint(map: MlMap, id: string, color: string, width: unknown, opacity: number) {
   try {
     map.setPaintProperty(id, "line-color", color)
     map.setPaintProperty(id, "line-width", width as never)
     map.setPaintProperty(id, "line-opacity", opacity)
-    if (dasharray) map.setPaintProperty(id, "line-dasharray", dasharray)
+    clearDasharray(map, id)
     try {
       map.setPaintProperty(id, "line-emissive-strength", 1)
     } catch {
@@ -154,29 +200,33 @@ function addLine(
   color: string,
   width: unknown,
   opacity: number,
-  dasharray?: number[],
+  cap: "butt" | "round",
 ) {
   if (map.getLayer(id)) {
-    setLinePaint(map, id, color, width, opacity, dasharray)
+    setLinePaint(map, id, color, width, opacity)
+    try {
+      map.setLayoutProperty(id, "line-cap", cap)
+      map.setLayoutProperty(id, "visibility", "visible")
+    } catch {
+      /* optional */
+    }
     return
   }
-  const paint: Record<string, unknown> = {
-    "line-color": color,
-    "line-width": width,
-    "line-opacity": opacity,
-  }
-  if (dasharray) paint["line-dasharray"] = dasharray
   try {
     map.addLayer({
       id,
       type: "line",
       source,
       layout: {
-        "line-cap": "round",
-        "line-join": "round",
+        "line-cap": cap,
+        "line-join": cap === "butt" ? "miter" : "round",
         visibility: "visible",
       },
-      paint: paint as never,
+      paint: {
+        "line-color": color,
+        "line-width": width,
+        "line-opacity": opacity,
+      } as never,
     })
     try {
       map.setPaintProperty(id, "line-emissive-strength", 1)
@@ -188,7 +238,47 @@ function addLine(
   }
 }
 
-/** Draw dashed PRC land outline (incl. Taiwan) and 南海诸岛十段线 above the field overlay. */
+function hideLegacy(map: MlMap) {
+  for (const id of LEGACY_PRC_IDS) {
+    if (!map.getLayer(id)) continue
+    try {
+      map.setLayoutProperty(id, "visibility", "none")
+    } catch {
+      /* optional */
+    }
+  }
+}
+
+/** Restyle OpenFreeMap province / prefecture lines: solid, 观潮 color, visible at China overview zoom. */
+export function styleProvinceBoundaries(map: MlMap, theme: BorderTheme = "paper") {
+  const paint = THEME[theme]
+  const layers = map.getStyle()?.layers || []
+  for (const layer of layers) {
+    if (layer.type !== "line") continue
+    const src = (layer as { "source-layer"?: string })["source-layer"] || ""
+    if (classifyBoundaryLayer(layer.id, src) !== "province") continue
+    try {
+      map.setLayoutProperty(layer.id, "visibility", "visible")
+      map.setLayoutProperty(layer.id, "line-cap", "butt")
+      map.setLayoutProperty(layer.id, "line-join", "miter")
+    } catch {
+      /* optional */
+    }
+    try {
+      map.setLayerZoomRange(layer.id, paint.provinceMinZoom, 24)
+    } catch {
+      /* optional */
+    }
+    setLinePaint(map, layer.id, paint.province, paint.provinceWidth, paint.provinceOpacity)
+    try {
+      map.setPaintProperty(layer.id, "line-blur", 0)
+    } catch {
+      /* optional */
+    }
+  }
+}
+
+/** Draw solid PRC land outline (incl. Taiwan) and 南海诸岛十段线 as geometry segments. */
 export async function applyChinaBorders(map: MlMap, theme: BorderTheme = "paper") {
   if (!map.getStyle()) return
   if (!map.isStyleLoaded()) {
@@ -198,6 +288,7 @@ export async function applyChinaBorders(map: MlMap, theme: BorderTheme = "paper"
     return
   }
   muteOsmCountryBoundaries(map)
+  styleProvinceBoundaries(map, theme)
   const data = await loadChinaPrcGeo()
   if (!data) {
     if (loadFailures < 4) {
@@ -228,33 +319,10 @@ export async function applyChinaBorders(map: MlMap, theme: BorderTheme = "paper"
   }
   ensure("prc-land", land)
   ensure("prc-dash", dash)
+  hideLegacy(map)
 
-  if (!map.getLayer("prc-land-fill")) {
-    try {
-      map.addLayer({
-        id: "prc-land-fill",
-        type: "fill",
-        source: "prc-land",
-        paint: {
-          "fill-color": paint.fill,
-          "fill-opacity": paint.fillOpacity,
-        },
-      })
-    } catch {
-      /* style busy */
-    }
-  } else {
-    try {
-      map.setPaintProperty("prc-land-fill", "fill-color", paint.fill)
-      map.setPaintProperty("prc-land-fill", "fill-opacity", paint.fillOpacity)
-    } catch {
-      /* optional */
-    }
-  }
-
-  addLine(map, "prc-land-case", "prc-land", paint.case, paint.caseWidth, 0.92, paint.dasharray)
-  addLine(map, "prc-dash-case", "prc-dash", paint.case, paint.dashCaseWidth, 0.88, paint.dasharray)
-  addLine(map, "prc-land-line", "prc-land", paint.land, paint.landWidth, 1, paint.dasharray)
-  addLine(map, "prc-dash-line", "prc-dash", paint.dash, paint.dashWidth, 1, paint.dasharray)
+  // National outline: solid (butt/round). 十段线: same color, solid stroke of short GeoJSON segments.
+  addLine(map, "prc-land-line", "prc-land", paint.land, paint.landWidth, paint.landOpacity, "round")
+  addLine(map, "prc-dash-line", "prc-dash", paint.dash, paint.dashWidth, paint.dashOpacity, "butt")
   raiseChinaBorders(map)
 }

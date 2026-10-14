@@ -1,6 +1,6 @@
 # Boundary data
 
-Forecast and Earth maps overlay `china-prc.geojson` (also copied to `apps/web/public/geo/` for the Nuxt static path). The client loads `/geo/china-prc.geojson` first, then `/api/geo/china-prc.json`. Layers are a **dashed** land outline + 南海诸岛十段线 (casing + stroke with `line-dasharray`, moved above the heatmap / particles). OpenFreeMap / OSM country lines are muted so Taiwan is not drawn as a separate country.
+Forecast and Earth maps overlay `china-prc.geojson` (also copied to `apps/web/public/geo/` for the Nuxt static path). The client loads `/geo/china-prc.geojson` first, then `/api/geo/china-prc.json`. Layers are a **solid** national land outline + 南海诸岛十段线 drawn as short solid GeoJSON segments (no `line-dasharray`). Globe stroke is 观潮 orange `rgba(255,186,92,0.95)` ~1.4px; forecast panels use a thick dark solid (~2px). OpenFreeMap country lines are muted so Taiwan is not drawn as a separate country; OSM province lines are restyled solid and shown at China-overview zoom.
 
 | Layer | File property `kind` | Source | Notes |
 | --- | --- | --- | --- |

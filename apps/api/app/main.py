@@ -199,6 +199,8 @@ async def catalog(session: AsyncSession = Depends(get_session)) -> dict[str, Any
             "field_ny": settings.field_ny,
             "current_nx": settings.current_nx,
             "current_ny": settings.current_ny,
+            "wind_nx": settings.wind_nx,
+            "wind_ny": settings.wind_ny,
         },
     }
     await openmeteo.cache_set_live_and_last(CATALOG_CACHE_KEY, out, settings.catalog_cache_ttl_seconds)
@@ -290,7 +292,7 @@ async def wind(model: str = Query("gfs_seamless")) -> dict[str, Any]:
     if model not in PREVIEW_BY_ID:
         model = "gfs_seamless"
     try:
-        return await openmeteo.fetch_wind_grid(model, nx=36, ny=18)
+        return await openmeteo.fetch_wind_grid(model, nx=settings.wind_nx, ny=settings.wind_ny)
     except Exception as exc:
         log.warning("wind live fetch failed: %s", exc)
         return openmeteo.synthetic_wind(20, 10, {"west": -180, "south": -70, "east": 180, "north": 70})

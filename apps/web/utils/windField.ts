@@ -1,4 +1,8 @@
+import { upsampleVectorField } from "./interp"
 import { isOcean, randomOceanPoint } from "./landmask"
+
+/** Render-side densification of the coarse Open-Meteo u/v grid. */
+export const VECTOR_UPSAMPLE = 4
 
 export type Wind = {
   width: number
@@ -30,18 +34,22 @@ export type WindGrid = {
 const DEG = Math.PI / 180
 const MAX_LAT = 78
 
-export function packWind(wind: Wind): WindGrid {
+export function packWind(wind: Wind, upsample = VECTOR_UPSAMPLE): WindGrid {
+  const u = wind.u instanceof Float32Array ? wind.u : new Float32Array(wind.u)
+  const v = wind.v instanceof Float32Array ? wind.v : new Float32Array(wind.v)
+  const mask = wind.mask ? (wind.mask instanceof Uint8Array ? wind.mask : Uint8Array.from(wind.mask)) : null
+  const dense = upsampleVectorField(u, v, wind.width, wind.height, upsample, mask)
   return {
-    width: wind.width,
-    height: wind.height,
+    width: dense.width,
+    height: dense.height,
     west: wind.west,
     south: wind.south,
     east: wind.east,
     north: wind.north,
-    u: wind.u instanceof Float32Array ? wind.u : new Float32Array(wind.u),
-    v: wind.v instanceof Float32Array ? wind.v : new Float32Array(wind.v),
-    mask: wind.mask ? (wind.mask instanceof Uint8Array ? wind.mask : Uint8Array.from(wind.mask)) : null,
-    nest: wind.nest ? packWind(wind.nest) : null,
+    u: dense.u,
+    v: dense.v,
+    mask: dense.mask,
+    nest: wind.nest ? packWind(wind.nest, upsample) : null,
   }
 }
 
@@ -109,11 +117,11 @@ export function mercatorY(lat: number) {
 }
 
 export function targetParticleCount(width: number, dpr: number, kind: "wind" | "current" = "wind") {
-  const bias = kind === "current" ? 1.45 : 1
-  if (width < 720) return Math.round(14000 * bias)
-  if (width < 1100) return Math.round(22000 * bias)
-  if (dpr > 1.6) return Math.round(30000 * bias)
-  return Math.round(34000 * bias)
+  const bias = kind === "current" ? 1.85 : 1.2
+  if (width < 720) return Math.round(18000 * bias)
+  if (width < 1100) return Math.round(28000 * bias)
+  if (dpr > 1.6) return Math.round(38000 * bias)
+  return Math.round(44000 * bias)
 }
 
 export function wrapLon(lon: number) {

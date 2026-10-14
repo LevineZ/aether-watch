@@ -1,4 +1,7 @@
 import { colorAt, type Palette } from "~/utils/colormap"
+import { sampleBicubic, sampleBilinear } from "~/utils/interp"
+
+export { sampleBicubic, sampleBilinear }
 
 export type ScalarField = {
   lats: number[]
@@ -27,16 +30,16 @@ const MEMO_MAX = 24
 export function rasterizeField(
   field: ScalarField,
   palette: Palette,
-  width = 1024,
-  height = 768,
-  mode: "bilinear" | "bicubic" = "bicubic",
+  width = 1280,
+  height = 960,
+  mode: "bilinear" | "bicubic" = "bilinear",
   opts?: { signalAlpha?: boolean; opacity?: number; prefilter?: boolean },
 ) {
   const ny = field.values.length
   const nx = field.values[0]?.length || 0
   const signal = !!opts?.signalAlpha
   const opacity = opts?.opacity ?? 208
-  const prefilter = opts?.prefilter !== false
+  const prefilter = !!opts?.prefilter
   const key = `${field.model || ""}|${field.valid_time || ""}|${nx}x${ny}|${field.min}|${field.max}|${palette}|${width}x${height}|${mode}|${signal}|${opacity}|${prefilter}`
   const hit = rasterMemo.get(key)
   if (hit) return hit
@@ -60,7 +63,7 @@ export function rasterizeField(
         img.data[o + 3] = 0
         continue
       }
-      const t = smoothstep(Math.min(1, Math.max(0, (v - field.min) / span)))
+      const t = Math.min(1, Math.max(0, (v - field.min) / span))
       const [r, g, b] = colorAt(palette, t)
       const edge = edgeFade(i, j, width, height)
       const a = (signal ? opacity * t ** 0.68 : opacity) * edge
@@ -80,17 +83,13 @@ export function rasterizeField(
   return url
 }
 
-function smoothstep(t: number) {
-  return t * t * (3 - 2 * t)
-}
-
 function edgeFade(i: number, j: number, w: number, h: number) {
-  const mx = Math.min(i, w - 1 - i) / Math.max(1, w * 0.018)
-  const my = Math.min(j, h - 1 - j) / Math.max(1, h * 0.018)
+  const mx = Math.min(i, w - 1 - i) / Math.max(1, w * 0.012)
+  const my = Math.min(j, h - 1 - j) / Math.max(1, h * 0.012)
   return Math.min(1, Math.max(0, Math.min(mx, my)))
 }
 
-/** Light 3×3 valid-neighbor blur so coarse Open-Meteo grids do not look tiled. */
+/** Optional 3×3 valid-neighbor blur. Off by default so bilinear stays continuous, not blotchy. */
 export function prefilterGrid(grid: (number | null)[][]): (number | null)[][] {
   const ny = grid.length
   const nx = grid[0]?.length || 0
@@ -129,80 +128,4 @@ export function fieldCorners(field: ScalarField): [[number, number], [number, nu
     [east, south],
     [west, south],
   ]
-}
-
-function pickValid(vals: Array<number | null | undefined>) {
-  for (const v of vals) {
-    if (v != null && Number.isFinite(v)) return v
-  }
-  return null
-}
-
-export function sampleBilinear(grid: (number | null)[][], x: number, y: number) {
-  const ny = grid.length
-  const nx = grid[0]?.length || 0
-  if (!nx || !ny) return null
-  const x0 = Math.max(0, Math.min(nx - 1, Math.floor(x)))
-  const y0 = Math.max(0, Math.min(ny - 1, Math.floor(y)))
-  const x1 = Math.min(nx - 1, x0 + 1)
-  const y1 = Math.min(ny - 1, y0 + 1)
-  const fx = x - x0
-  const fy = y - y0
-  const v00 = grid[y0][x0]
-  const v10 = grid[y0][x1]
-  const v01 = grid[y1][x0]
-  const v11 = grid[y1][x1]
-  const known = [v00, v10, v01, v11].filter((v): v is number => v != null && Number.isFinite(v))
-  if (known.length === 0) return null
-  if (known.length < 4) {
-    const w00 = (v00 == null ? 0 : (1 - fx) * (1 - fy))
-    const w10 = (v10 == null ? 0 : fx * (1 - fy))
-    const w01 = (v01 == null ? 0 : (1 - fx) * fy)
-    const w11 = (v11 == null ? 0 : fx * fy)
-    const w = w00 + w10 + w01 + w11
-    if (w <= 1e-6) return pickValid([v00, v10, v01, v11])
-    return ((v00 || 0) * w00 + (v10 || 0) * w10 + (v01 || 0) * w01 + (v11 || 0) * w11) / w
-  }
-  return v00 * (1 - fx) * (1 - fy) + v10 * fx * (1 - fy) + v01 * (1 - fx) * fy + v11 * fx * fy
-}
-
-function cubic(p0: number, p1: number, p2: number, p3: number, t: number) {
-  return (
-    p1 +
-    0.5 *
-      t *
-      (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)))
-  )
-}
-
-function at(grid: (number | null)[][], ix: number, iy: number) {
-  const ny = grid.length
-  const nx = grid[0]?.length || 0
-  const x = Math.max(0, Math.min(nx - 1, ix))
-  const y = Math.max(0, Math.min(ny - 1, iy))
-  const v = grid[y][x]
-  return v != null && Number.isFinite(v) ? v : null
-}
-
-export function sampleBicubic(grid: (number | null)[][], x: number, y: number) {
-  const ny = grid.length
-  const nx = grid[0]?.length || 0
-  if (!nx || !ny) return null
-  const x0 = Math.floor(x)
-  const y0 = Math.floor(y)
-  const fx = x - x0
-  const fy = y - y0
-  const cols: number[] = []
-  for (let jj = -1; jj <= 2; jj++) {
-    const row: number[] = []
-    for (let ii = -1; ii <= 2; ii++) {
-      const v = at(grid, x0 + ii, y0 + jj)
-      if (v == null) {
-        return sampleBilinear(grid, x, y)
-      }
-      row.push(v)
-    }
-    cols.push(cubic(row[0], row[1], row[2], row[3], fx))
-  }
-  return cubic(cols[0], cols[1], cols[2], cols[3], fy)
 }

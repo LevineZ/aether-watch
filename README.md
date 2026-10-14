@@ -50,7 +50,7 @@ Caddy still fronts the stack at `:8765`. No need to rebuild postgres / redis / m
 
 ### Mac Docker notes
 
-From the repo root (Apple Silicon and Intel both work with Compose). After pulling this change, rebuild **api + web** (and worker if you run the cache warmer) so the new border GeoJSON styling, particle seeding, and Open-Meteo throttle land:
+From the repo root (Apple Silicon and Intel both work with Compose). After pulling this change, rebuild **api + web** (and worker if you run the cache warmer) so the solid 观潮-style borders, bilinear overlays, denser particles, and Open-Meteo throttle land:
 
 ```bash
 # from the AetherWatch repo root
@@ -61,8 +61,8 @@ Caddy still fronts the stack at `:8765`. No need to rebuild postgres / redis / m
 
 Then open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 
-- Earth: PRC land outline + 南海诸岛十段线 should be a **bright gold highlight** on the globe (above particles / overlays).
-- Forecast: the same borders are a **vermillion highlight** above the heatmap.
+- Earth: PRC land outline + 南海诸岛十段线 should be a **solid 观潮 orange** stroke on the globe (`rgba(255,186,92,0.95)`, ~1.4px; 十段线 is short geometry segments).
+- Forecast: the same borders are a **thick dark solid** (~2px) above the heatmap, with thinner province lines.
 - Currents particles should seed across Pacific / Atlantic / Indian / Southern / China seas — not pile up only in 南海.
 
 Field / current grids are cached in Redis. After a density or cache-schema change, flush so you do not keep an old payload:
@@ -83,7 +83,7 @@ docker compose up --build
 
 - 地球页默认 **洋流**（Open-Meteo Marine 表层流），可切到 **风场** 与气温 / 气压 / 降水；模式芯片会跟着要素换成 Marine/SMOC 或 GFS/IFS。
 - 预报页多图 **镜头联动**（滚轮缩放 / 拖动平移同步），单击格点拉序列；时效 +0h～+120h，可播放。时间序列来自 Open-Meteo（GFS / IFS / AIFS 等）。
-- 中国空间场默认约 **20×15** 点采样（可用 `FIELD_NX` / `FIELD_NY` 加密；默认偏向 Open-Meteo 限流稳定），预报图预滤波 + 双三次插值；每张图标 **起报 / 有效** 时刻与 Open-Meteo 模式 id。国界为 DataV 中国国界（含台湾、南海诸岛）+ gmt-china 十段线，**虚线**叠在场之上。
+- 中国空间场默认约 **20×15** 点采样（可用 `FIELD_NX` / `FIELD_NY` 加密；默认偏向 Open-Meteo 限流稳定），预报图客户端 **双线性** 加密成连续色斑图；每张图标 **起报 / 有效** 时刻与 Open-Meteo 模式 id。国界为 DataV 中国国界（含台湾、南海诸岛）实线 + gmt-china 十段线（短几何段），地球页橙实线、预报页深色实线。
 - 地球洋流粒子按洋盆播种（太平洋 / 大西洋 / 印度洋 / 南大洋 + 中国近海轻量嵌套），不再只堆在南海；气温 / 气压 / 降水是半透明插值场，不是整球单色。
 - Open-Meteo 拉取默认 **concurrency=1**、小批次、请求间隔与指数退避；优先 Redis 缓存，禁止连打免费接口。
 - 管理页可上传 NetCDF；`NcIngestActor` 解析，`NcTileActor` 产出一张二维场给地图。u/v 洋流 NetCDF 会出现在地球页洋流模式里。
@@ -134,6 +134,7 @@ Defaults prefer **Open-Meteo stability over dense grids** (not the 64×48 / 36×
 | --- | --- | --- |
 | `FIELD_NX` / `FIELD_NY` | `20` / `15` | China `/api/field` sample grid. Raise if you have quota. |
 | `CURRENT_NX` / `CURRENT_NY` | `16` / `8` | Global current u/v grid (land cells skipped). |
+| `WIND_NX` / `WIND_NY` | `20` / `10` | Global wind u/v grid. Client bilinear-upsamples; do not raise live. |
 | `OPEN_METEO_BATCH_SIZE` | `40` | Locations per Open-Meteo request (POST body). Hard-capped at 80. |
 | `OPEN_METEO_CONCURRENCY` | `1` | Shared parallel Open-Meteo batches. Keep at 1. |
 | `OPEN_METEO_MIN_INTERVAL_SECONDS` | `0.75` | Minimum gap between outbound Open-Meteo calls. |
@@ -156,7 +157,7 @@ Defaults prefer **Open-Meteo stability over dense grids** (not the 64×48 / 36×
 
 Each field payload includes `init_time` (Open-Meteo hourly[0], 起报), `valid_time` (hourly[step], 有效), `model_id`, and `kind=model_forecast`. Current grids also carry a China-seas nest (`105–132°E`, `3–41°N`) used for local detail, not for dumping every particle into 南海.
 
-PRC borders: see `content/geo/README.md`. Land + **十段线** use a **dashed** stroke (not a thicker solid OSM admin line). OpenFreeMap admin lines are muted so Taiwan is not shown as a separate country.
+PRC borders: see `content/geo/README.md`. Land is a **solid** stroke; **十段线** is the same color drawn as discrete GeoJSON segments (not `line-dasharray`). OpenFreeMap country lines are muted so Taiwan is not shown as a separate country; province lines stay and are restyled solid.
 
 ## Local development without Compose (optional)
 

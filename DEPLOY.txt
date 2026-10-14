@@ -21,9 +21,9 @@ unless their configs changed.
 What you should see
 -------------------
 
-- Earth: PRC land outline + 南海诸岛十段线 as a dashed gold stroke
-  (above particles / overlays).
-- Forecast: the same borders as a dashed vermillion stroke above the heatmap.
+- Earth: PRC land outline + 南海诸岛十段线 as a solid 观潮 orange
+  stroke (above particles / overlays). 十段线 is short geometry segments.
+- Forecast: the same borders as a thick dark solid above the heatmap.
 - Currents: particles seeded across Pacific / Atlantic / Indian / Southern
   / China seas — not piled only in 南海.
 
@@ -44,6 +44,7 @@ Defaults prefer stability over density (free API 429s easily):
 
     FIELD_NX=20 FIELD_NY=15
     CURRENT_NX=16 CURRENT_NY=8
+    WIND_NX=20 WIND_NY=10
     OPEN_METEO_CONCURRENCY=1
     OPEN_METEO_BATCH_SIZE=40
     OPEN_METEO_MIN_INTERVAL_SECONDS=0.75

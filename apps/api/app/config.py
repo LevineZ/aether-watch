@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     current_ny: int = 8
     current_nest_nx: int = 16
     current_nest_ny: int = 12
+    # Live wind stays coarse; the globe bilinear-upsamples. Raise only with quota.
+    wind_nx: int = 20
+    wind_ny: int = 10
     # Conservative Open-Meteo pacing. Keep concurrency=1 and leave gaps.
     open_meteo_batch_size: int = 40
     open_meteo_concurrency: int = 1

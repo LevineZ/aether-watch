@@ -131,10 +131,10 @@ function paint() {
   const url = rasterizeField(
     props.field,
     props.palette || "thermal",
-    Math.min(2048, Math.max(960, nx * 32)),
-    Math.min(1536, Math.max(720, ny * 32)),
-    "bicubic",
-    { signalAlpha: signalPalette(props.palette || "thermal"), opacity: 188, prefilter: true },
+    Math.min(2560, Math.max(1280, nx * 64)),
+    Math.min(1920, Math.max(960, ny * 64)),
+    "bilinear",
+    { signalAlpha: signalPalette(props.palette || "thermal"), opacity: 198, prefilter: false },
   )
   const coordinates = fieldCorners(props.field)
   const src = map.getSource("field") as maplibregl.ImageSource | undefined
@@ -149,7 +149,7 @@ function paint() {
         type: "raster",
         source: "field",
         paint: {
-          "raster-opacity": 0.7,
+          "raster-opacity": 0.78,
           "raster-fade-duration": 0,
           "raster-resampling": "linear",
         },
