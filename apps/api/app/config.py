@@ -17,25 +17,27 @@ class Settings(BaseSettings):
     news_dir: str = "/content/news"
     geo_dir: str = "/content/geo"
     content_dir: str = "/content"
-    cache_ttl_seconds: int = 1800
-    wind_cache_ttl_seconds: int = 3600
-    current_cache_ttl_seconds: int = 3600
-    # China preview field sampling (Open-Meteo locations). 64×48 ≈ 1° over the full PRC frame.
-    field_nx: int = 64
-    field_ny: int = 48
-    current_nx: int = 36
-    current_ny: int = 18
-    current_nest_nx: int = 36
-    current_nest_ny: int = 28
-    # Conservative Open-Meteo pacing. The free API 429s if we batch large
-    # multi-location bodies in parallel — keep concurrency=1 and leave gaps.
-    open_meteo_batch_size: int = 48
+    # Live Redis TTL. Prefer cache over another Open-Meteo round-trip.
+    cache_ttl_seconds: int = 21600
+    wind_cache_ttl_seconds: int = 21600
+    current_cache_ttl_seconds: int = 21600
+    catalog_cache_ttl_seconds: int = 3600
+    last_good_ttl_seconds: int = 604800
+    open_meteo_stale_ttl_seconds: int = 604800
+    # Conservative grids: stability over density (main had 64×48 / 36×18).
+    field_nx: int = 20
+    field_ny: int = 15
+    current_nx: int = 16
+    current_ny: int = 8
+    current_nest_nx: int = 16
+    current_nest_ny: int = 12
+    # Conservative Open-Meteo pacing. Keep concurrency=1 and leave gaps.
+    open_meteo_batch_size: int = 40
     open_meteo_concurrency: int = 1
     open_meteo_min_interval_seconds: float = 0.75
     open_meteo_max_retries: int = 6
     open_meteo_backoff_base: float = 2.0
     open_meteo_backoff_cap_seconds: float = 45.0
-    open_meteo_stale_ttl_seconds: int = 14400
 
 
 settings = Settings()

@@ -21,9 +21,9 @@ unless their configs changed.
 What you should see
 -------------------
 
-- Earth: PRC land outline + 南海诸岛十段线 as a bright gold highlight
+- Earth: PRC land outline + 南海诸岛十段线 as a dashed gold stroke
   (above particles / overlays).
-- Forecast: the same borders as a vermillion highlight above the heatmap.
+- Forecast: the same borders as a dashed vermillion stroke above the heatmap.
 - Currents: particles seeded across Pacific / Atlantic / Indian / Southern
   / China seas — not piled only in 南海.
 
@@ -33,21 +33,25 @@ Stale Redis overlays
 Cache keys are versioned (field:v4:, currents:v3:, wind:v2:).
 Flush only if you still see an old overlay after rebuild:
 
-    docker compose exec redis redis-cli FLUSHDB
+    curl -X POST -H "X-Admin-Token: aether-dev" http://127.0.0.1:8765/api/admin/cache/flush
+
+Prefer the admin flush (keeps last-good, delayed prewarm) over FLUSHDB.
 
 Open-Meteo (do not hammer)
 --------------------------
 
-Defaults are conservative on purpose (free API 429s easily):
+Defaults prefer stability over density (free API 429s easily):
 
+    FIELD_NX=20 FIELD_NY=15
+    CURRENT_NX=16 CURRENT_NY=8
     OPEN_METEO_CONCURRENCY=1
-    OPEN_METEO_BATCH_SIZE=48
+    OPEN_METEO_BATCH_SIZE=40
     OPEN_METEO_MIN_INTERVAL_SECONDS=0.75
 
 Do not raise concurrency above 1 on a laptop deploy.
 First field fetch is slower on a cold cache (serial + paced);
 after that Redis serves it. On 429 the API backs off and prefers
-the last-good cache. Optionally lower FIELD_NX / FIELD_NY.
+the last-good cache. Raise FIELD_NX / FIELD_NY only if you have quota.
 
 Useful commands
 ---------------

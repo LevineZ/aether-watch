@@ -70,6 +70,10 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertEqual(settings.open_meteo_concurrency, 1)
         self.assertLessEqual(settings.open_meteo_batch_size, 80)
         self.assertGreaterEqual(settings.open_meteo_min_interval_seconds, 0.5)
+        self.assertLessEqual(settings.field_nx, 32)
+        self.assertLessEqual(settings.field_ny, 24)
+        self.assertLessEqual(settings.current_nx, 24)
+        self.assertLessEqual(settings.current_ny, 12)
 
     def test_current_basins_are_global_not_scs_only(self):
         text = (REPO / "apps" / "web" / "utils" / "windField.ts").read_text(encoding="utf-8")

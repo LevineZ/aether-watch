@@ -243,8 +243,8 @@ async function load() {
         south: -70,
         east: 180,
         north: 70,
-        nx: 36,
-        ny: 18,
+        nx: 16,
+        ny: 10,
         step: 0,
       },
     })

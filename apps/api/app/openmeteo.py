@@ -99,7 +99,12 @@ async def http() -> httpx.AsyncClient:
 async def cache() -> redis.Redis:
     global _redis
     if _redis is None:
-        _redis = redis.from_url(settings.redis_url, decode_responses=True)
+        _redis = redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1.5,
+            socket_timeout=2.0,
+        )
     return _redis
 
 
@@ -126,14 +131,48 @@ async def cache_set(key: str, value: Any, ttl: int) -> None:
 async def cache_remember(key: str, value: Any, ttl: int) -> None:
     """Write the live key plus a longer-lived last-good copy."""
     await cache_set(key, value, ttl)
-    await cache_set(f"{key}:last", value, max(ttl, settings.open_meteo_stale_ttl_seconds))
+    last_ttl = max(ttl, settings.open_meteo_stale_ttl_seconds, settings.last_good_ttl_seconds)
+    await cache_set(f"{key}:last", value, last_ttl)
+
+
+async def cache_set_live_and_last(key: str, value: Any, ttl: int) -> None:
+    await cache_remember(key, value, ttl)
 
 
 async def cache_get_prefer(key: str) -> Any | None:
     hit = await cache_get(key)
     if hit:
         return hit
-    return await cache_get(f"{key}:last")
+    last = await cache_get(f"{key}:last")
+    if last:
+        last["cached"] = True
+        last["stale"] = True
+        last.setdefault("degraded", "open-meteo-stale")
+    return last
+
+
+LIVE_PREFIXES = ("field:", "currents:", "wind:", "series:", "catalog:")
+
+
+async def flush_live_cache() -> int:
+    """Drop live keys only. Keep *:last so 429s can still serve last-good."""
+    try:
+        r = await cache()
+    except Exception:
+        return 0
+    n = 0
+    try:
+        async for key in r.scan_iter(match="*"):
+            if not isinstance(key, str):
+                continue
+            if key.endswith(":last") or key in {"aetherwatch:visitors"}:
+                continue
+            if key.startswith(LIVE_PREFIXES):
+                await r.delete(key)
+                n += 1
+    except Exception as exc:
+        log.warning("flush live cache: %s", exc)
+    return n
 
 
 async def incr_visitors() -> int:
@@ -728,6 +767,38 @@ def synthetic_wind(nx: int, ny: int, bbox: dict[str, float], reason: str = "fall
     u += -12.0 * dy / r * np.exp(-r / 18)
     v += 12.0 * dx / r * np.exp(-r / 18)
     return _vector_payload(nx, ny, bbox, u, v, f"synthetic:{reason}", nx * ny, kind="wind")
+
+
+async def prewarm_hot_paths() -> dict[str, Any]:
+    """Serialized warm of catalog-adjacent OM payloads. Safe to call on idle start."""
+    summary: dict[str, Any] = {"ok": [], "errors": {}}
+    try:
+        await fetch_current_grid("best_match")
+        summary["ok"].append(f"currents:{settings.current_nx}x{settings.current_ny}")
+    except Exception as exc:
+        summary["errors"]["currents"] = str(exc)
+        log.warning("prewarm currents: %s", exc)
+    try:
+        await fetch_wind_grid("gfs_seamless", nx=20, ny=10)
+        summary["ok"].append("wind:20x10")
+    except Exception as exc:
+        summary["errors"]["wind"] = str(exc)
+        log.warning("prewarm wind: %s", exc)
+    try:
+        await fetch_field(
+            "gfs_seamless",
+            "temperature_2m",
+            CHINA_BBOX,
+            nx=settings.field_nx,
+            ny=settings.field_ny,
+            step=0,
+        )
+        summary["ok"].append(f"field:{settings.field_nx}x{settings.field_ny}")
+    except Exception as exc:
+        summary["errors"]["field"] = str(exc)
+        log.warning("prewarm field: %s", exc)
+    log.info("open-meteo prewarm %s", summary)
+    return summary
 
 
 async def close() -> None:

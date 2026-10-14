@@ -83,7 +83,7 @@ docker compose up --build
 
 - 地球页默认 **洋流**（Open-Meteo Marine 表层流），可切到 **风场** 与气温 / 气压 / 降水；模式芯片会跟着要素换成 Marine/SMOC 或 GFS/IFS。
 - 预报页多图 **镜头联动**（滚轮缩放 / 拖动平移同步），单击格点拉序列；时效 +0h～+120h，可播放。时间序列来自 Open-Meteo（GFS / IFS / AIFS 等）。
-- 中国空间场默认约 **64×48** 点采样，预报图预滤波 + 双三次插值；每张图标 **起报 / 有效** 时刻与 Open-Meteo 模式 id。国界为 DataV 中国国界（含台湾、南海诸岛）+ gmt-china 十段线，**加粗高亮**叠在场之上。
+- 中国空间场默认约 **20×15** 点采样（可用 `FIELD_NX` / `FIELD_NY` 加密；默认偏向 Open-Meteo 限流稳定），预报图预滤波 + 双三次插值；每张图标 **起报 / 有效** 时刻与 Open-Meteo 模式 id。国界为 DataV 中国国界（含台湾、南海诸岛）+ gmt-china 十段线，**虚线**叠在场之上。
 - 地球洋流粒子按洋盆播种（太平洋 / 大西洋 / 印度洋 / 南大洋 + 中国近海轻量嵌套），不再只堆在南海；气温 / 气压 / 降水是半透明插值场，不是整球单色。
 - Open-Meteo 拉取默认 **concurrency=1**、小批次、请求间隔与指数退避；优先 Redis 缓存，禁止连打免费接口。
 - 管理页可上传 NetCDF；`NcIngestActor` 解析，`NcTileActor` 产出一张二维场给地图。u/v 洋流 NetCDF 会出现在地球页洋流模式里。
@@ -122,31 +122,41 @@ MinIO is built from the community GitHub binary (`infra/minio/Dockerfile`) becau
 
 ## Env knobs (rate-limit / density)
 
-The free Open-Meteo API 429s if we fire large multi-location batches in parallel. AetherWatch is deliberately conservative:
+Defaults prefer **Open-Meteo stability over dense grids** (not the 64×48 / 36×18 sampling):
 
 1. **Prefer cache** — Redis live key first, then a longer-lived `:last` copy. Live fetches only run on a miss.
 2. **concurrency=1** — one in-flight Open-Meteo request for the whole process (API and worker share the same defaults).
-3. **Small batches + gap** — 48 locations per POST, ≥0.75s between calls.
+3. **Small batches + gap** — 40 locations per POST, ≥0.75s between calls.
 4. **Exponential backoff** — 429 / 5xx wait `2^attempt` seconds (plus jitter, cap 45s) and honor `Retry-After`. Never tight-loop.
 5. Forecast maps load models **one after another** so a compare view does not enqueue four full grids at once.
 
 | Variable | Default | What |
 | --- | --- | --- |
-| `FIELD_NX` / `FIELD_NY` | `64` / `48` | China `/api/field` sample grid. Lower if Open-Meteo still rate-limits. |
-| `CURRENT_NX` / `CURRENT_NY` | `36` / `18` | Global current u/v grid (land cells skipped). |
-| `OPEN_METEO_BATCH_SIZE` | `48` | Locations per Open-Meteo request (POST body). Hard-capped at 80. |
+| `FIELD_NX` / `FIELD_NY` | `20` / `15` | China `/api/field` sample grid. Raise if you have quota. |
+| `CURRENT_NX` / `CURRENT_NY` | `16` / `8` | Global current u/v grid (land cells skipped). |
+| `OPEN_METEO_BATCH_SIZE` | `40` | Locations per Open-Meteo request (POST body). Hard-capped at 80. |
 | `OPEN_METEO_CONCURRENCY` | `1` | Shared parallel Open-Meteo batches. Keep at 1. |
 | `OPEN_METEO_MIN_INTERVAL_SECONDS` | `0.75` | Minimum gap between outbound Open-Meteo calls. |
+| `CACHE_TTL_SECONDS` | `21600` | Live Redis TTL for series / China fields (6h). |
+| `WIND_CACHE_TTL_SECONDS` | `21600` | Live TTL for `/api/wind`. |
+| `CURRENT_CACHE_TTL_SECONDS` | `21600` | Live TTL for `/api/currents`. |
+| `CATALOG_CACHE_TTL_SECONDS` | `3600` | Redis TTL for `/api/catalog`. |
+| `LAST_GOOD_TTL_SECONDS` / `OPEN_METEO_STALE_TTL_SECONDS` | `604800` | Last-good payload kept 7d; served on upstream 429. |
 | `OPEN_METEO_BASE` | `https://api.open-meteo.com` | Forecast API. |
 | `OPEN_METEO_MARINE_BASE` | `https://marine-api.open-meteo.com` | Marine / currents API. |
 
-`/api/field` still accepts `nx`/`ny` query overrides (`4–96` / `4–72`). Forecast maps omit them so the env defaults apply. Globe scalar overlay requests a global `36×18` and paints it with a WebGL interpolated layer (transparent where empty / dry).
+`/api/field` still accepts `nx`/`ny` query overrides (`4–96` / `4–72`). Forecast maps omit them so the env defaults apply. Globe scalar overlay requests a coarser global `16×10` and paints it with a WebGL interpolated layer (transparent where empty / dry).
 
-Each field payload includes `init_time` (Open-Meteo hourly[0], 起报), `valid_time` (hourly[step], 有效), `model_id`, and `kind=model_forecast`.
+### Cache, last-good, prewarm
 
-Redis caches fields (`CACHE_TTL_SECONDS`, default 1800) plus a last-good copy (`OPEN_METEO_STALE_TTL_SECONDS`, 4h). Current/wind grids use 3600s. Current grids also carry a China-seas nest (`105–132°E`, `3–41°N`) used for local detail, not for dumping every particle into 南海.
+- Live keys expire at the TTLs above. A successful fetch also writes `*:last` (7 days).
+- On Open-Meteo **429 / sparse / empty**, endpoints return the last-good payload (`stale: true`) instead of failing.
+- API **first-idle prewarm** (≈2s after startup) serializes default **currents**, **wind 20×10**, and **China field 20×15**.
+- `POST /api/admin/cache/flush` (admin token) drops **live** keys only, keeps last-good, and schedules prewarm after **15s**.
 
-PRC borders: see `content/geo/README.md`. The overlay is a thick highlighted land outline + 十段线 (casing + bright stroke, `line-emissive-strength` on the globe). OpenFreeMap admin lines are muted so Taiwan is not shown as a separate country.
+Each field payload includes `init_time` (Open-Meteo hourly[0], 起报), `valid_time` (hourly[step], 有效), `model_id`, and `kind=model_forecast`. Current grids also carry a China-seas nest (`105–132°E`, `3–41°N`) used for local detail, not for dumping every particle into 南海.
+
+PRC borders: see `content/geo/README.md`. Land + **十段线** use a **dashed** stroke (not a thicker solid OSM admin line). OpenFreeMap admin lines are muted so Taiwan is not shown as a separate country.
 
 ## Local development without Compose (optional)
 

@@ -91,7 +91,7 @@ const THEME: Record<BorderTheme, ThemePaint> = {
     dashWidth: zoomWidth(2.55, 3.7, 5.1),
     caseWidth: zoomWidth(4.4, 6.2, 8.2),
     dashCaseWidth: zoomWidth(5.0, 7.0, 9.2),
-    dasharray: [2.6, 1.35],
+    dasharray: [2.5, 1.75],
   },
   globe: {
     fill: "#f6d27a",
@@ -103,7 +103,7 @@ const THEME: Record<BorderTheme, ThemePaint> = {
     dashWidth: zoomWidth(2.9, 4.1, 5.6),
     caseWidth: zoomWidth(5.0, 6.8, 9.0),
     dashCaseWidth: zoomWidth(5.6, 7.6, 10.2),
-    dasharray: [2.4, 1.2],
+    dasharray: [2.4, 1.7],
   },
 }
 
@@ -111,7 +111,7 @@ export function firstPrcLayerId(map: MlMap): string | undefined {
   return PRC_LAYER_IDS.find((id) => map.getLayer(id))
 }
 
-/** Keep the highlighted PRC outline + 十段线 above heatmaps / particles. */
+/** Keep the dashed PRC outline + 十段线 above heatmaps / particles. */
 export function raiseChinaBorders(map: MlMap) {
   for (const id of PRC_LAYER_IDS) {
     if (map.getLayer(id)) {
@@ -188,7 +188,7 @@ function addLine(
   }
 }
 
-/** Draw PRC land outline (incl. Taiwan) and 南海诸岛十段线 above the field overlay. */
+/** Draw dashed PRC land outline (incl. Taiwan) and 南海诸岛十段线 above the field overlay. */
 export async function applyChinaBorders(map: MlMap, theme: BorderTheme = "paper") {
   if (!map.getStyle()) return
   if (!map.isStyleLoaded()) {
@@ -252,9 +252,9 @@ export async function applyChinaBorders(map: MlMap, theme: BorderTheme = "paper"
     }
   }
 
-  addLine(map, "prc-land-case", "prc-land", paint.case, paint.caseWidth, 0.92)
+  addLine(map, "prc-land-case", "prc-land", paint.case, paint.caseWidth, 0.92, paint.dasharray)
   addLine(map, "prc-dash-case", "prc-dash", paint.case, paint.dashCaseWidth, 0.88, paint.dasharray)
-  addLine(map, "prc-land-line", "prc-land", paint.land, paint.landWidth, 1)
+  addLine(map, "prc-land-line", "prc-land", paint.land, paint.landWidth, 1, paint.dasharray)
   addLine(map, "prc-dash-line", "prc-dash", paint.dash, paint.dashWidth, 1, paint.dasharray)
   raiseChinaBorders(map)
 }

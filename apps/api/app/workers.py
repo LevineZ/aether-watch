@@ -22,43 +22,24 @@ broker = ListQueueBroker(url=settings.redis_url).with_result_backend(
 
 
 class ForecastIngestActor:
-    """Warm Redis with live Open-Meteo series/field/wind so the UI is snappy."""
+    """Warm Redis with serialized Open-Meteo currents/wind/field. force=True drops live keys only."""
 
     @staticmethod
     @broker.task(task_name="forecast_ingest")
     async def run(force: bool = False) -> dict:
-        from app.catalog import CHINA_BBOX, DEFAULT_POINT, PREVIEW_MODELS
-        from app.openmeteo import fetch_current_grid, fetch_field, fetch_series, fetch_wind_grid
+        from app.openmeteo import flush_live_cache, prewarm_hot_paths
 
-        models = [m["id"] for m in PREVIEW_MODELS[:3]]
-        summary: dict = {"actor": "ForecastIngestActor", "ok": [], "errors": {}}
+        summary: dict = {"actor": "ForecastIngestActor", "force": force, "ok": [], "errors": {}}
+        if force:
+            # Live keys only — keep last-good, then serialized prewarm (no parallel storm).
+            dropped = await flush_live_cache()
+            summary["dropped"] = dropped
         try:
-            await fetch_series(DEFAULT_POINT["lat"], DEFAULT_POINT["lon"], "temperature_2m", models)
-            summary["ok"].append("series:beijing:t2m")
+            warmed = await prewarm_hot_paths()
+            summary["ok"] = warmed.get("ok") or []
+            summary["errors"] = warmed.get("errors") or {}
         except Exception as exc:
-            summary["errors"]["series"] = str(exc)
-        try:
-            await fetch_field(
-                models[0],
-                "temperature_2m",
-                CHINA_BBOX,
-                nx=settings.field_nx,
-                ny=settings.field_ny,
-                step=0,
-            )
-            summary["ok"].append(f"field:gfs:t2m:{settings.field_nx}x{settings.field_ny}")
-        except Exception as exc:
-            summary["errors"]["field"] = str(exc)
-        try:
-            await fetch_wind_grid(models[0], nx=20, ny=10)
-            summary["ok"].append("wind:gfs")
-        except Exception as exc:
-            summary["errors"]["wind"] = str(exc)
-        try:
-            await fetch_current_grid("best_match")
-            summary["ok"].append("currents:marine")
-        except Exception as exc:
-            summary["errors"]["currents"] = str(exc)
+            summary["errors"]["prewarm"] = str(exc)
 
         await _activity("ingest", "预报缓存刷新", json.dumps(summary, ensure_ascii=False)[:800], summary)
         return summary
@@ -101,6 +82,7 @@ class NcIngestActor:
                     Path(tmp).unlink(missing_ok=True)
 
         await NcTileActor.run.kiq(dataset_id)
+        await _invalidate_catalog()
         await _activity("dataset", f"已解析 {row.filename}", None, {"id": dataset_id, "dims": row.dims})
         return {"ok": True, "id": dataset_id, "status": "parsed"}
 
@@ -138,6 +120,7 @@ class NcTileActor:
                     field.get("variable"),
                     {"id": dataset_id, "bbox": field.get("bbox")},
                 )
+                await _invalidate_catalog()
                 return {"ok": True, "id": dataset_id, "variable": field.get("variable")}
             except Exception as exc:
                 row.status = "error"
@@ -147,6 +130,16 @@ class NcTileActor:
             finally:
                 if tmp:
                     Path(tmp).unlink(missing_ok=True)
+
+
+async def _invalidate_catalog() -> None:
+    try:
+        from app.openmeteo import cache
+
+        r = await cache()
+        await r.delete("catalog:v1")
+    except Exception:
+        return
 
 
 async def _activity(kind: str, title: str, detail: str | None, payload: dict | None) -> None:

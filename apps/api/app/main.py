@@ -30,10 +30,29 @@ from app.db import Activity, Dataset, SessionLocal, get_session, init_db
 from app.news import get_article, list_articles
 from app import ncproc, openmeteo, storage
 from app.landmask import apply_ocean_mask
-from app.workers import ForecastIngestActor, NcIngestActor, broker
+from app.workers import NcIngestActor, broker
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("aetherwatch")
+
+CATALOG_CACHE_KEY = "catalog:v1"
+
+
+async def _prewarm_idle() -> None:
+    """First-idle serialized Open-Meteo warm so a cold UI does not stampede."""
+    await asyncio.sleep(2.0)
+    try:
+        await openmeteo.prewarm_hot_paths()
+    except Exception as exc:
+        log.warning("prewarm: %s", exc)
+
+
+async def _invalidate_catalog() -> None:
+    try:
+        r = await openmeteo.cache()
+        await r.delete(CATALOG_CACHE_KEY)
+    except Exception:
+        return
 
 
 async def _wait_db(retries: int = 20) -> None:
@@ -61,10 +80,10 @@ async def lifespan(_: FastAPI):
     log.info("start taskiq broker")
     try:
         await asyncio.wait_for(broker.startup(), timeout=8)
-        await asyncio.wait_for(ForecastIngestActor.run.kiq(False), timeout=8)
-        log.info("forecast ingest enqueued")
+        log.info("taskiq broker ready (skip boot ingest; API prewarm owns OM)")
     except Exception as exc:
-        log.warning("forecast ingest enqueue: %s", exc)
+        log.warning("taskiq broker: %s", exc)
+    asyncio.create_task(_prewarm_idle())
     yield
     try:
         await broker.shutdown()
@@ -142,6 +161,10 @@ async def meta() -> dict[str, Any]:
 
 @app.get("/api/catalog")
 async def catalog(session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    hit = await openmeteo.cache_get(CATALOG_CACHE_KEY)
+    if hit:
+        hit["cached"] = True
+        return hit
     result = await session.execute(select(Dataset).order_by(desc(Dataset.created_at)))
     datasets = []
     for row in result.scalars():
@@ -164,13 +187,22 @@ async def catalog(session: AsyncSession = Depends(get_session)) -> dict[str, Any
                 "error_message": row.error_message,
             }
         )
-    return {
+    out = {
         "models": PREVIEW_MODELS,
         "elements": ELEMENTS,
         "datasets": datasets,
         "globe_elements": GLOBE_ELEMENTS,
         "current_models": CURRENT_MODELS,
+        "cached": False,
+        "grid": {
+            "field_nx": settings.field_nx,
+            "field_ny": settings.field_ny,
+            "current_nx": settings.current_nx,
+            "current_ny": settings.current_ny,
+        },
     }
+    await openmeteo.cache_set_live_and_last(CATALOG_CACHE_KEY, out, settings.catalog_cache_ttl_seconds)
+    return out
 
 
 @app.get("/api/series")
@@ -397,6 +429,7 @@ async def upload_dataset(
     session.add(row)
     session.add(Activity(kind="dataset", title=f"上传 {name}", detail=f"{len(data)} bytes", payload={"id": dataset_id}))
     await session.commit()
+    await _invalidate_catalog()
     try:
         await NcIngestActor.run.kiq(dataset_id)
     except Exception as exc:
@@ -418,6 +451,7 @@ async def seed_demo_nc(
     row = Dataset(id=dataset_id, filename=name, status="uploaded", minio_key=key)
     session.add(row)
     await session.commit()
+    await _invalidate_catalog()
     await NcIngestActor.run.kiq(dataset_id)
     return {"id": dataset_id, "filename": name, "status": "uploaded", "bytes": len(data)}
 
@@ -436,8 +470,35 @@ async def seed_demo_current_nc(
     row = Dataset(id=dataset_id, filename=name, status="uploaded", minio_key=key)
     session.add(row)
     await session.commit()
+    await _invalidate_catalog()
     await NcIngestActor.run.kiq(dataset_id)
     return {"id": dataset_id, "filename": name, "status": "uploaded", "bytes": len(data)}
+
+
+@app.post("/api/admin/cache/flush")
+async def flush_forecast_cache(
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Drop live Redis keys only. Last-good payloads stay; OM re-fetch is delayed."""
+    _admin(x_admin_token)
+    dropped = await openmeteo.flush_live_cache()
+    await _invalidate_catalog()
+
+    async def _later() -> None:
+        await asyncio.sleep(15.0)
+        try:
+            await openmeteo.prewarm_hot_paths()
+        except Exception as exc:
+            log.warning("delayed prewarm after flush: %s", exc)
+
+    asyncio.create_task(_later())
+    return {
+        "ok": True,
+        "dropped": dropped,
+        "kept_last_good": True,
+        "prewarm_in_s": 15,
+        "note": "does not stampede Open-Meteo; last-good served until delayed prewarm",
+    }
 
 
 @app.get("/api/admin/datasets")
