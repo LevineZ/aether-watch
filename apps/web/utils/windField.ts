@@ -1,5 +1,8 @@
 import { upsampleVectorField } from "./interp"
 import { isOcean, randomOceanPoint } from "./landmask"
+import type { ScalarField } from "./rasterField"
+
+export const FLOW_VMAX = { current: 1.35, wind: 16 } as const
 
 /** Render-side densification of the coarse Open-Meteo u/v grid. */
 export const VECTOR_UPSAMPLE = 4
@@ -116,12 +119,54 @@ export function mercatorY(lat: number) {
   return Math.min(0.9999, Math.max(0.0001, y))
 }
 
+/**
+ * Ribbon coverage, not 1px-dot count. Long faded trails read dense at ~8–12k particles;
+ * 40k+ GL_LINES still looked like specks at default globe framing.
+ */
 export function targetParticleCount(width: number, dpr: number, kind: "wind" | "current" = "wind") {
-  const bias = kind === "current" ? 1.85 : 1.2
-  if (width < 720) return Math.round(18000 * bias)
-  if (width < 1100) return Math.round(28000 * bias)
-  if (dpr > 1.6) return Math.round(38000 * bias)
-  return Math.round(44000 * bias)
+  const bias = kind === "current" ? 1.28 : 1.05
+  if (width < 720) return Math.round(8000 * bias)
+  if (width < 1100) return Math.round(10500 * bias)
+  if (dpr > 1.6) return Math.round(12000 * bias)
+  return Math.round(13500 * bias)
+}
+
+/** Client-side speed scalar from the same u/v grid (no extra Open-Meteo fetch). */
+export function windSpeedField(
+  wind: Wind,
+  opts?: { oceanOnly?: boolean; vmax?: number },
+): ScalarField {
+  const grid = packWind(wind)
+  const oceanOnly = !!opts?.oceanOnly
+  const vmax = opts?.vmax ?? (oceanOnly ? FLOW_VMAX.current : FLOW_VMAX.wind)
+  const nx = grid.width
+  const ny = grid.height
+  const lons = Array.from({ length: nx }, (_, i) => grid.west + (i / Math.max(1, nx - 1)) * (grid.east - grid.west))
+  const lats = Array.from({ length: ny }, (_, j) => grid.south + (j / Math.max(1, ny - 1)) * (grid.north - grid.south))
+  const values: (number | null)[][] = []
+  for (let j = 0; j < ny; j++) {
+    const lat = lats[j]
+    const row: (number | null)[] = []
+    for (let i = 0; i < nx; i++) {
+      const lon = lons[i]
+      if (oceanOnly && !isOcean(lon, lat)) {
+        row.push(null)
+        continue
+      }
+      const [u, v] = sampleWind(grid, lon, lat, oceanOnly)
+      row.push(Math.hypot(u, v))
+    }
+    values.push(row)
+  }
+  return {
+    lats,
+    lons,
+    values,
+    min: 0,
+    max: vmax,
+    unit: "m/s",
+    bbox: { west: grid.west, south: grid.south, east: grid.east, north: grid.north },
+  }
 }
 
 export function wrapLon(lon: number) {

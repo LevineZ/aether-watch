@@ -1,6 +1,7 @@
 import type { CustomLayerInterface, Map as MlMap } from "maplibre-gl"
 import { isOcean } from "./landmask"
 import {
+  FLOW_VMAX,
   mercatorX,
   mercatorY,
   packWind,
@@ -27,13 +28,20 @@ type RenderArgs = {
   modelViewProjectionMatrix?: Float32Array | number[]
 }
 
-const TRAIL = 22
-const STRIDE = 4
-const MAX_PARTICLES = 50000
-const VERTS_PER_PARTICLE = (TRAIL - 1) * 2
-/** Degrees per 16.67ms at 1 m/s. Slower than before so long trails read as ribbons. */
-const CURRENT_STEP = 0.016
-const WIND_STEP = 0.022
+/** History points per particle. Long enough to read as 观潮 streamlines at China globe scale. */
+const TRAIL = 32
+/** pos.xy, other.xy, side, speed, alpha, pad */
+const STRIDE = 8
+const MAX_PARTICLES = 16000
+/** Two verts per history point + a few degenerates to join strips. */
+const VERTS_PER_PARTICLE = TRAIL * 2 + 4
+/**
+ * Degrees per 16.67ms at 1 m/s.
+ * Currents are ~10–30× slower than wind in m/s; 观潮 scales them up (velocityScale 1/4400 vs 1/60000)
+ * so ribbons actually travel at globe scale instead of sitting as dots.
+ */
+const CURRENT_STEP = 0.58
+const WIND_STEP = 0.03
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
   const sh = gl.createShader(type)
@@ -70,6 +78,8 @@ function link(gl: WebGL2RenderingContext, vsSrc: string, fsSrc: string) {
 type ShaderBundle = {
   program: WebGLProgram
   aPos: number
+  aOther: number
+  aSide: number
   aSpeed: number
   aAlpha: number
   uMatrix: WebGLUniformLocation | null
@@ -79,11 +89,14 @@ type ShaderBundle = {
   uTrans: WebGLUniformLocation | null
   uKind: WebGLUniformLocation | null
   uVmax: WebGLUniformLocation | null
+  uWidth: WebGLUniformLocation | null
+  uPixel: WebGLUniformLocation | null
 }
 
 /**
- * MapLibre custom layer: CPU advection + one GPU line draw.
- * Globe projection is MapLibre's `projectTile` (no per-particle project/unproject).
+ * MapLibre custom layer: CPU advection + GPU triangle-strip ribbons.
+ * WebGL lineWidth is 1px on most GPUs, so GL_LINES read as dots at globe scale.
+ * Ribbons are extruded in clip space to a stable pixel width (观潮-like faded trails).
  */
 export class WindParticleLayer implements CustomLayerInterface {
   id = "aether-flow"
@@ -137,7 +150,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   resize(width: number, dpr: number) {
-    const next = Math.min(MAX_PARTICLES, Math.max(6000, Math.round(this.baseCount(width, dpr) * this.quality())))
+    const next = Math.min(MAX_PARTICLES, Math.max(4500, Math.round(this.baseCount(width, dpr) * this.quality())))
     if (next !== this.count) this.seed(next)
   }
 
@@ -194,7 +207,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   render(gl: WebGL2RenderingContext, args: RenderArgs) {
-    if (!this.visible || !this.playing || !this.grid || this.usedVerts < 2) return
+    if (!this.visible || !this.playing || !this.grid || this.usedVerts < 4) return
     const bundle = this.getShader(gl, args)
     if (!bundle) return
 
@@ -206,24 +219,31 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.uniform4f(bundle.uClip, ...proj.clippingPlane)
     gl.uniform1f(bundle.uTrans, proj.projectionTransition)
     gl.uniform1f(bundle.uKind, this.kind === "current" ? 1 : 0)
-    gl.uniform1f(bundle.uVmax, this.kind === "current" ? 1.35 : 16)
+    gl.uniform1f(bundle.uVmax, this.kind === "current" ? FLOW_VMAX.current : FLOW_VMAX.wind)
+    gl.uniform1f(bundle.uWidth, this.ribbonWidth())
+    gl.uniform2f(bundle.uPixel, 2 / Math.max(1, gl.drawingBufferWidth), 2 / Math.max(1, gl.drawingBufferHeight))
 
     if (this.vao) gl.bindVertexArray(this.vao)
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer)
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.verts.subarray(0, this.usedVerts * STRIDE))
 
     gl.enableVertexAttribArray(bundle.aPos)
+    gl.enableVertexAttribArray(bundle.aOther)
+    gl.enableVertexAttribArray(bundle.aSide)
     gl.enableVertexAttribArray(bundle.aSpeed)
     gl.enableVertexAttribArray(bundle.aAlpha)
     const stride = STRIDE * 4
     gl.vertexAttribPointer(bundle.aPos, 2, gl.FLOAT, false, stride, 0)
-    gl.vertexAttribPointer(bundle.aSpeed, 1, gl.FLOAT, false, stride, 8)
-    gl.vertexAttribPointer(bundle.aAlpha, 1, gl.FLOAT, false, stride, 12)
+    gl.vertexAttribPointer(bundle.aOther, 2, gl.FLOAT, false, stride, 8)
+    gl.vertexAttribPointer(bundle.aSide, 1, gl.FLOAT, false, stride, 16)
+    gl.vertexAttribPointer(bundle.aSpeed, 1, gl.FLOAT, false, stride, 20)
+    gl.vertexAttribPointer(bundle.aAlpha, 1, gl.FLOAT, false, stride, 24)
 
     gl.enable(gl.BLEND)
-    gl.blendFunc(gl.ONE, gl.ONE)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
     gl.disable(gl.DEPTH_TEST)
-    gl.drawArrays(gl.LINES, 0, this.usedVerts)
+    gl.disable(gl.CULL_FACE)
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, this.usedVerts)
     if (this.vao) gl.bindVertexArray(null)
   }
 
@@ -236,7 +256,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   private baseCount(width: number, dpr: number) {
-    if (this.reduced) return this.kind === "current" ? 5200 : 4000
+    if (this.reduced) return this.kind === "current" ? 2800 : 2200
     return Math.min(MAX_PARTICLES, targetParticleCount(width, dpr, this.kind))
   }
 
@@ -244,6 +264,14 @@ export class WindParticleLayer implements CustomLayerInterface {
     if (this.dropped > 8) return 0.55
     if (this.dropped > 3) return 0.75
     return 1
+  }
+
+  /** Pixel width at default China globe framing (~zoom 1.7). Currents are thicker, slower ribbons. */
+  private ribbonWidth() {
+    const z = this.map?.getZoom() ?? 1.7
+    const base = this.kind === "current" ? 3.15 : 2.15
+    const zoomMul = z < 2.15 ? 1.38 : z < 3.4 ? 1.05 : 0.85
+    return base * zoomMul
   }
 
   private seed(n: number) {
@@ -265,15 +293,39 @@ export class WindParticleLayer implements CustomLayerInterface {
         }
       }
     }
+    const current = this.kind === "current"
+    const step = current ? CURRENT_STEP : WIND_STEP
+    const dead = current ? 0.01 : 0.1
+    const o = i * TRAIL
+    const xs = new Float32Array(TRAIL)
+    const ys = new Float32Array(TRAIL)
+    let filled = 0
+    const pre = randomAge && this.grid ? TRAIL - 1 : 0
+    for (let s = 0; s <= pre; s++) {
+      xs[filled] = mercatorX(lon)
+      ys[filled] = mercatorY(lat)
+      filled++
+      if (!this.grid || s === pre) break
+      const [u, v] = sampleWind(this.grid, lon, lat, current)
+      const spd = Math.hypot(u, v)
+      lon = wrapLon(lon + u * step)
+      lat += v * step
+      if (spd < dead || lat > 76 || lat < -76 || (current && !isOcean(lon, lat))) break
+    }
     this.lon[i] = lon
     this.lat[i] = lat
-    this.age[i] = randomAge ? (Math.random() * 80) | 0 : 0
-    const x = mercatorX(lon)
-    const y = mercatorY(lat)
-    const o = i * TRAIL
+    this.age[i] = randomAge ? (TRAIL + ((Math.random() * 80) | 0)) : filled
+    const x0 = xs[0]
+    const y0 = ys[0]
+    const pad = TRAIL - filled
     for (let k = 0; k < TRAIL; k++) {
-      this.histX[o + k] = x
-      this.histY[o + k] = y
+      if (k < pad) {
+        this.histX[o + k] = x0
+        this.histY[o + k] = y0
+      } else {
+        this.histX[o + k] = xs[k - pad]
+        this.histY[o + k] = ys[k - pad]
+      }
     }
   }
 
@@ -311,10 +363,36 @@ export class WindParticleLayer implements CustomLayerInterface {
     const camLat = cam?.lat ?? 0
     const sinCam = Math.sin(camLat * (Math.PI / 180))
     const cosCam = Math.cos(camLat * (Math.PI / 180))
-    const maxAge = interacting ? 90 : current ? 420 : 160
+    const maxAge = interacting ? 90 : current ? 400 : 150
     let w = 0
     const verts = this.verts
     const minCos = 0.02
+    const segs = interacting ? 10 : current ? TRAIL - 1 : Math.min(TRAIL - 1, 22)
+    const start = TRAIL - 1 - segs
+
+    const emit = (x: number, y: number, ox: number, oy: number, side: number, spd: number, alpha: number) => {
+      let p = w * STRIDE
+      verts[p++] = x
+      verts[p++] = y
+      verts[p++] = ox
+      verts[p++] = oy
+      verts[p++] = side
+      verts[p++] = spd
+      verts[p++] = alpha
+      verts[p++] = 0
+      w++
+    }
+    const dupLast = () => {
+      if (w === 0) return
+      const b = (w - 1) * STRIDE
+      const p = w * STRIDE
+      for (let k = 0; k < STRIDE; k++) verts[p + k] = verts[b + k]
+      w++
+    }
+    const emitPair = (x: number, y: number, ox: number, oy: number, spd: number, alpha: number) => {
+      emit(x, y, ox, oy, -1, spd, alpha)
+      emit(x, y, ox, oy, 1, spd, alpha)
+    }
 
     for (let i = 0; i < n; i++) {
       let lon = this.lon[i]
@@ -339,33 +417,39 @@ export class WindParticleLayer implements CustomLayerInterface {
       this.histX[o + TRAIL - 1] = mercatorX(lon)
       this.histY[o + TRAIL - 1] = mercatorY(lat)
 
-      if (this.age[i] < 2) continue
+      if (this.age[i] < 3) continue
 
       const φ = lat * (Math.PI / 180)
       const dλ = (lon - camLon) * (Math.PI / 180)
       const cosc = Math.sin(φ) * sinCam + Math.cos(φ) * cosCam * Math.cos(dλ)
       if (cosc < minCos) continue
 
-      const segs = interacting ? 4 : TRAIL - 1
-      const start = TRAIL - 1 - segs
+      let wrapped = false
       for (let k = start; k < TRAIL - 1; k++) {
-        const x0 = this.histX[o + k]
-        const y0 = this.histY[o + k]
-        const x1 = this.histX[o + k + 1]
-        const y1 = this.histY[o + k + 1]
-        if (Math.abs(x1 - x0) > 0.45) continue
-        const a0 = ((k - start + 1) / (segs + 1)) * 0.62
-        const a1 = ((k - start + 2) / (segs + 1)) * 1.0
-        let p = w * STRIDE
-        verts[p++] = x0
-        verts[p++] = y0
-        verts[p++] = spd
-        verts[p++] = a0
-        verts[p++] = x1
-        verts[p++] = y1
-        verts[p++] = spd
-        verts[p++] = a1
-        w += 2
+        if (Math.abs(this.histX[o + k + 1] - this.histX[o + k]) > 0.45) {
+          wrapped = true
+          break
+        }
+      }
+      if (wrapped) continue
+
+      const join = w > 0
+      if (join) dupLast()
+      for (let k = start; k < TRAIL; k++) {
+        const x = this.histX[o + k]
+        const y = this.histY[o + k]
+        const other = k < TRAIL - 1 ? k + 1 : k - 1
+        const ox = this.histX[o + other]
+        const oy = this.histY[o + other]
+        const t = (k - start + 1) / (segs + 1)
+        const alpha = Math.pow(t, 0.72) * (current ? 0.92 : 1)
+        if (join && k === start) {
+          emit(x, y, ox, oy, -1, spd, alpha)
+          dupLast()
+          emit(x, y, ox, oy, 1, spd, alpha)
+        } else {
+          emitPair(x, y, ox, oy, spd, alpha)
+        }
       }
     }
     this.usedVerts = w
@@ -379,26 +463,42 @@ export class WindParticleLayer implements CustomLayerInterface {
 
     const prelude = desc?.vertexShaderPrelude || ""
     const define = desc?.define || ""
-    const project = prelude.includes("projectTile")
-      ? "gl_Position = projectTile(a_pos);"
-      : "gl_Position = u_projection_matrix * vec4(a_pos, 0.0, 1.0);"
+    const clipPos = prelude.includes("projectTile")
+      ? "vec4 clipPos(vec2 p) { return projectTile(p); }"
+      : "vec4 clipPos(vec2 p) { return u_projection_matrix * vec4(p, 0.0, 1.0); }"
     const vs = `#version 300 es
 ${prelude}
 ${define}
 in vec2 a_pos;
+in vec2 a_other;
+in float a_side;
 in float a_speed;
 in float a_alpha;
+uniform vec2 u_pixel;
+uniform float u_width;
 out float v_speed;
 out float v_alpha;
+out float v_side;
+${clipPos}
 void main() {
-  ${project}
+  vec4 a = clipPos(a_pos);
+  vec4 b = clipPos(a_other);
+  float aw = max(abs(a.w), 1e-6);
+  vec2 ndcA = a.xy / aw;
+  vec2 ndcB = b.xy / max(abs(b.w), 1e-6);
+  vec2 dir = ndcB - ndcA;
+  float len = length(dir);
+  vec2 n = len > 1e-7 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
+  gl_Position = vec4((ndcA + n * a_side * u_width * u_pixel) * a.w, a.z, a.w);
   v_speed = a_speed;
   v_alpha = a_alpha;
+  v_side = a_side;
 }`
     const fs = `#version 300 es
 precision highp float;
 in float v_speed;
 in float v_alpha;
+in float v_side;
 uniform float u_kind;
 uniform float u_vmax;
 out vec4 fragColor;
@@ -406,23 +506,24 @@ void main() {
   float t = clamp(v_speed / max(u_vmax, 0.05), 0.0, 1.0);
   vec3 col;
   if (u_kind > 0.5) {
-    vec3 c1 = vec3(0.10, 0.55, 0.72);
-    vec3 c2 = vec3(0.28, 0.90, 0.82);
-    vec3 c3 = vec3(0.85, 0.98, 0.92);
-    vec3 c4 = vec3(0.96, 0.78, 0.42);
+    vec3 c1 = vec3(0.12, 0.58, 0.72);
+    vec3 c2 = vec3(0.22, 0.88, 0.90);
+    vec3 c3 = vec3(0.62, 0.98, 0.94);
+    vec3 c4 = vec3(0.88, 1.00, 0.98);
     col = t < 0.4 ? mix(c1, c2, t / 0.4)
         : t < 0.75 ? mix(c2, c3, (t - 0.4) / 0.35)
         : mix(c3, c4, (t - 0.75) / 0.25);
   } else {
-    vec3 c1 = vec3(0.45, 0.82, 1.00);
-    vec3 c2 = vec3(0.58, 0.94, 0.78);
-    vec3 c3 = vec3(0.98, 0.80, 0.38);
-    vec3 c4 = vec3(0.91, 0.36, 0.10);
+    vec3 c1 = vec3(0.22, 0.72, 0.38);
+    vec3 c2 = vec3(0.62, 0.92, 0.28);
+    vec3 c3 = vec3(0.97, 0.92, 0.30);
+    vec3 c4 = vec3(1.00, 0.78, 0.22);
     col = t < 0.33 ? mix(c1, c2, t / 0.33)
         : t < 0.66 ? mix(c2, c3, (t - 0.33) / 0.33)
         : mix(c3, c4, (t - 0.66) / 0.34);
   }
-  float a = v_alpha * (0.28 + 0.72 * t);
+  float edge = 1.0 - smoothstep(0.72, 1.0, abs(v_side));
+  float a = v_alpha * edge * (0.58 + 0.42 * t);
   fragColor = vec4(col * a, a);
 }`
     const program = link(gl, vs, fs)
@@ -430,6 +531,8 @@ void main() {
     const bundle: ShaderBundle = {
       program,
       aPos: gl.getAttribLocation(program, "a_pos"),
+      aOther: gl.getAttribLocation(program, "a_other"),
+      aSide: gl.getAttribLocation(program, "a_side"),
       aSpeed: gl.getAttribLocation(program, "a_speed"),
       aAlpha: gl.getAttribLocation(program, "a_alpha"),
       uMatrix: gl.getUniformLocation(program, "u_projection_matrix"),
@@ -439,6 +542,8 @@ void main() {
       uTrans: gl.getUniformLocation(program, "u_projection_transition"),
       uKind: gl.getUniformLocation(program, "u_kind"),
       uVmax: gl.getUniformLocation(program, "u_vmax"),
+      uWidth: gl.getUniformLocation(program, "u_width"),
+      uPixel: gl.getUniformLocation(program, "u_pixel"),
     }
     this.shaders.set(key, bundle)
     return bundle

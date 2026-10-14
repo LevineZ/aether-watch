@@ -116,9 +116,15 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertLess(weights["scs"] + weights["china-seas"], 0.2)
         self.assertGreater(weights["n-pacific"] + weights["s-pacific"] + weights["n-atlantic"], 0.4)
         self.assertIn("VECTOR_UPSAMPLE", text)
+        self.assertIn("windSpeedField", text)
         layer = (REPO / "apps" / "web" / "utils" / "windLayer.ts").read_text(encoding="utf-8")
-        self.assertRegex(layer, r"const TRAIL = 2[0-9]")
-        self.assertIn("CURRENT_STEP = 0.016", layer)
+        self.assertIn("TRIANGLE_STRIP", layer)
+        self.assertNotIn("drawArrays(gl.LINES", layer)
+        self.assertRegex(layer, r"const TRAIL = 3[0-9]")
+        match = __import__("re").search(r"const CURRENT_STEP = ([0-9.]+)", layer)
+        self.assertIsNotNone(match)
+        self.assertGreaterEqual(float(match.group(1)), 0.2)
+        self.assertIn("u_width", layer)
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
       }
       if (type === "fill" || type === "fill-extrusion") {
         if (src.includes("water") || src.includes("ocean") || src.includes("sea")) {
-          map.setPaintProperty(id, "fill-color", "#06121c")
+          map.setPaintProperty(id, "fill-color", "#071624")
           if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
         } else if (src.includes("building")) {
           map.setLayoutProperty(id, "visibility", "none")

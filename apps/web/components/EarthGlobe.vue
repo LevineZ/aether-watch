@@ -14,7 +14,7 @@ import { restyleGlobe, paintStars } from "~/utils/globeStyle"
 import type { ScalarField } from "~/utils/rasterField"
 import { ScalarFieldLayer, signalPalette } from "~/utils/fieldLayer"
 import { WindParticleLayer, type FlowKind } from "~/utils/windLayer"
-import type { Wind } from "~/utils/windField"
+import { windSpeedField, type Wind } from "~/utils/windField"
 import type { Palette } from "~/utils/colormap"
 import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_DARK } from "~/utils/mapLabels"
 import { applyChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
@@ -45,13 +45,25 @@ function firstSymbolId(ml: maplibregl.Map) {
 
 function paintOverlay() {
   if (!map?.isStyleLoaded() || !scalarLayer) return
-  const field = props.field || null
-  const palette = props.palette || "thermal"
-  scalarLayer.setField(field, palette, {
-    signalAlpha: signalPalette(palette),
-    opacity: signalPalette(palette) ? 0.86 : 0.42,
-  })
-  layer?.setVisible(!field)
+  if (props.field) {
+    const palette = props.palette || "thermal"
+    scalarLayer.setField(props.field, palette, {
+      signalAlpha: signalPalette(palette),
+      opacity: signalPalette(palette) ? 0.86 : 0.42,
+    })
+    layer?.setVisible(false)
+  } else if (props.flow) {
+    const kind = props.kind || "current"
+    const speed = windSpeedField(props.flow, { oceanOnly: kind === "current" })
+    scalarLayer.setField(speed, kind === "current" ? "current" : "wind", {
+      signalAlpha: false,
+      opacity: kind === "current" ? 0.58 : 0.62,
+    })
+    layer?.setVisible(true)
+  } else {
+    scalarLayer.setField(null, "current")
+    layer?.setVisible(true)
+  }
   raiseChinaBorders(map)
   map.triggerRepaint()
 }
@@ -83,8 +95,8 @@ onMounted(async () => {
   map = new maplibregl.Map({
     container: host.value,
     style: style as never,
-    center: [132, 18],
-    zoom: 1.62,
+    center: [110, 30],
+    zoom: 1.68,
     minZoom: 0.7,
     maxZoom: 5.8,
     pitch: 0,
@@ -119,7 +131,7 @@ watch(
   () => [props.flow, props.kind] as const,
   () => {
     layer?.setField(props.flow, props.kind || "current")
-    layer?.setVisible(!props.field)
+    paintOverlay()
   },
 )
 
