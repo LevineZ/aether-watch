@@ -58,7 +58,7 @@ docker compose up --build
 
 - 地球页默认 **洋流**（Open-Meteo Marine 表层流），可切到 **风场** 与气温 / 气压 / 降水；模式芯片会跟着要素换成 Marine/SMOC 或 GFS/IFS。
 - 预报页多图 **镜头联动**（滚轮缩放 / 拖动平移同步），单击格点拉序列；时效 +0h～+120h，可播放。时间序列来自 Open-Meteo（GFS / IFS / AIFS 等）。
-- 中国空间场默认约 **40×30** 点采样（不再是 10×7 色块）。
+- 中国空间场默认约 **20×15** 点采样（可用 `FIELD_NX` / `FIELD_NY` 加密；默认偏向 Open-Meteo 限流稳定）。
 - 管理页可上传 NetCDF；`NcIngestActor` 解析，`NcTileActor` 产出一张二维场给地图。u/v 洋流 NetCDF 会出现在地球页洋流模式里。
 - 公开源失败时地球粒子回落合成场，来源行会标明「合成场」。
 
@@ -95,18 +95,34 @@ MinIO is built from the community GitHub binary (`infra/minio/Dockerfile`) becau
 
 ## Env knobs (rate-limit / density)
 
+Defaults prefer **Open-Meteo stability over dense grids**. Actual code defaults (not the old 40×30 / 24×12 dense sampling):
+
 | Variable | Default | What |
 | --- | --- | --- |
-| `FIELD_NX` / `FIELD_NY` | `40` / `30` | China `/api/field` sample grid. Lower if Open-Meteo rate-limits. |
-| `CURRENT_NX` / `CURRENT_NY` | `24` / `12` | Global current u/v grid (land cells skipped). |
+| `FIELD_NX` / `FIELD_NY` | `20` / `15` | China `/api/field` sample grid. Raise if you have quota. |
+| `CURRENT_NX` / `CURRENT_NY` | `16` / `8` | Global current u/v grid (land cells skipped). |
 | `OPEN_METEO_BATCH_SIZE` | `40` | Locations per Open-Meteo request. |
-| `OPEN_METEO_CONCURRENCY` | `3` | Parallel Open-Meteo batches. |
+| `OPEN_METEO_CONCURRENCY` | `1` | Parallel Open-Meteo batches (keep at 1). |
+| `OPEN_METEO_MAX_RETRIES` | `4` | Exponential backoff on 429 / 5xx. |
+| `OPEN_METEO_BACKOFF_BASE` | `1.5` | First backoff seconds (doubles to 32s cap). |
+| `CACHE_TTL_SECONDS` | `21600` | Live Redis TTL for series / China fields (6h). |
+| `WIND_CACHE_TTL_SECONDS` | `21600` | Live TTL for `/api/wind`. |
+| `CURRENT_CACHE_TTL_SECONDS` | `21600` | Live TTL for `/api/currents`. |
+| `CATALOG_CACHE_TTL_SECONDS` | `3600` | Redis TTL for `/api/catalog`. |
+| `LAST_GOOD_TTL_SECONDS` | `604800` | Stale payload kept 7d; served on upstream 429. |
 | `OPEN_METEO_BASE` | `https://api.open-meteo.com` | Forecast API. |
 | `OPEN_METEO_MARINE_BASE` | `https://marine-api.open-meteo.com` | Marine / currents API. |
 
 `/api/field` still accepts `nx`/`ny` query overrides (`4–48` / `4–36`). Forecast maps omit them so the env defaults apply. Globe scalar overlay still requests a coarser global `16×10`.
 
-Redis caches fields (`CACHE_TTL_SECONDS`, default 1800) and current/wind grids (3600s) so a cold 40×30 fetch is rare.
+### Cache, last-good, prewarm
+
+- Live keys expire at the TTLs above. A successful fetch also writes `*:last` (7 days).
+- On Open-Meteo **429 / sparse / empty**, endpoints return the last-good payload (`stale: true`, `degraded: …`) instead of failing.
+- API **first-idle prewarm** (≈2s after startup) serializes catalog-adjacent OM calls: default **currents**, **wind 20×10**, **China field 20×15**. In-process single-flight + Redis lock + `concurrency=1` so the UI and worker cannot stampede.
+- `POST /api/admin/cache/flush` (admin token) drops **live** keys only, keeps last-good, and schedules prewarm after **15s** — it does not immediately re-fetch the full grid.
+
+Globe / forecast MapLibre layers overlay PRC-compliant China land + **十段线** as a **dashed** stroke (not a thicker solid OSM admin line).
 
 ## Local development without Compose (optional)
 

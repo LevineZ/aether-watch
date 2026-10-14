@@ -17,16 +17,22 @@ class Settings(BaseSettings):
     news_dir: str = "/content/news"
     geo_dir: str = "/content/geo"
     content_dir: str = "/content"
-    cache_ttl_seconds: int = 1800
-    wind_cache_ttl_seconds: int = 3600
-    current_cache_ttl_seconds: int = 3600
-    # China preview field sampling (Open-Meteo locations). 40×30 ≈ 1.5° over CHINA_BBOX.
-    field_nx: int = 40
-    field_ny: int = 30
-    current_nx: int = 24
-    current_ny: int = 12
+    # Live Redis TTL. Raise these if Open-Meteo 429s after cache expiry.
+    cache_ttl_seconds: int = 21600
+    wind_cache_ttl_seconds: int = 21600
+    current_cache_ttl_seconds: int = 21600
+    catalog_cache_ttl_seconds: int = 3600
+    last_good_ttl_seconds: int = 604800
+    # China preview field sampling. 20×15 ≈ 3° over CHINA_BBOX (was 40×30).
+    # Raise FIELD_NX/NY if you have headroom; lower further on 429s.
+    field_nx: int = 20
+    field_ny: int = 15
+    current_nx: int = 16
+    current_ny: int = 8
     open_meteo_batch_size: int = 40
-    open_meteo_concurrency: int = 3
+    open_meteo_concurrency: int = 1
+    open_meteo_max_retries: int = 4
+    open_meteo_backoff_base: float = 1.5
 
 
 settings = Settings()

@@ -45,6 +45,7 @@ import {
   type MapCamera,
 } from "~/composables/useLinkedCamera"
 import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_POSITRON } from "~/utils/mapLabels"
+import { addChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
 
 const props = withDefaults(
   defineProps<{
@@ -133,6 +134,7 @@ function paint() {
       paint: { "raster-opacity": 0.84, "raster-fade-duration": 0 },
     })
   }
+  raiseChinaBorders(map)
 }
 
 function placeMarker() {
@@ -198,6 +200,7 @@ onMounted(async () => {
     paint()
     placeMarker()
     map?.resize()
+    void addChinaBorders(map!, { url: resolveApi("/api/geo/china-bounds.json"), theme: "light" })
   })
   map.on("move", () => {
     if (applying) return

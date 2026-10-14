@@ -83,9 +83,10 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
         ) {
           map.setLayoutProperty(id, "visibility", "none")
         } else if (src.includes("bound") || src.includes("admin") || src.includes("country")) {
+          // Keep OSM admin faint; PRC dashed overlay is added separately.
           map.setPaintProperty(id, "line-color", "#6d7c90")
-          map.setPaintProperty(id, "line-opacity", 0.28)
-          map.setPaintProperty(id, "line-width", 0.6)
+          map.setPaintProperty(id, "line-opacity", 0.18)
+          map.setPaintProperty(id, "line-width", 0.45)
         } else if (src.includes("water")) {
           map.setPaintProperty(id, "line-color", "#143047")
           map.setPaintProperty(id, "line-opacity", 0.35)

@@ -16,6 +16,7 @@ import { WindParticleLayer, type FlowKind } from "~/utils/windLayer"
 import type { Wind } from "~/utils/windField"
 import type { Palette } from "~/utils/colormap"
 import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_DARK } from "~/utils/mapLabels"
+import { addChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
 
 const props = defineProps<{
   flow: Wind | null
@@ -58,6 +59,7 @@ function paintOverlay() {
     })
   }
   if (map.getLayer("scalar")) map.setLayoutProperty("scalar", "visibility", "visible")
+  raiseChinaBorders(map)
 }
 
 function onResize() {
@@ -105,6 +107,9 @@ onMounted(async () => {
     restyleGlobe(map, locale.value)
     if (!map.getLayer(layer.id)) map.addLayer(layer)
     paintOverlay()
+    void addChinaBorders(map, { url: resolveApi("/api/geo/china-bounds.json"), theme: "dark" }).then(() => {
+      if (map) raiseChinaBorders(map)
+    })
     ready.value = true
     emit("ready")
   })
@@ -133,7 +138,10 @@ watch(
 )
 
 watch(locale, (lang) => {
-  if (map?.isStyleLoaded()) restyleGlobe(map, lang)
+  if (map?.isStyleLoaded()) {
+    restyleGlobe(map, lang)
+    raiseChinaBorders(map)
+  }
 })
 
 onBeforeUnmount(() => {
