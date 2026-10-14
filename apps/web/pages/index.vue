@@ -21,14 +21,27 @@
         :kind="flowKind"
         :playing="playing"
         :field="scalar"
-        :palette="activeEl?.palette || 'current'"
+        :palette="activeEl?.palette || 'waves'"
         @ready="globeReady = true"
       />
       <template #fallback>
         <div class="loading" style="color:#ddd;padding:6rem 2rem">{{ t("earth.loading") }}</div>
       </template>
     </ClientOnly>
-    <aside class="earth-panel">
+    <button
+      class="earth-dock"
+      type="button"
+      :aria-expanded="panelOpen"
+      aria-controls="earth-panel"
+      :title="t('earth.togglePanel')"
+      @click="togglePanel"
+    >
+      earth
+    </button>
+    <aside id="earth-panel" class="earth-panel" :hidden="!panelOpen">
+      <button class="earth-panel-close" type="button" :title="t('earth.hidePanel')" @click="panelOpen = false">
+        ×
+      </button>
       <label>{{ t("earth.element") }}</label>
       <div class="chips">
         <button
@@ -57,19 +70,26 @@
       </div>
       <label>{{ t("earth.layer") }}</label>
       <div class="chips">
-        <button class="chip" :class="{ active: playing }" type="button" @click="playing = !playing">
+        <button
+          v-if="activeEl?.kind === 'vector'"
+          class="chip"
+          :class="{ active: playing }"
+          type="button"
+          @click="playing = !playing"
+        >
           {{ playing ? t("earth.animOn", { label: elName(activeEl) || t("earth.particles") }) : t("earth.animOff", { label: elName(activeEl) || t("earth.particles") }) }}
         </button>
+        <span v-else class="chip quiet">{{ t("earth.overlayOnly") }}</span>
       </div>
-      <div class="legend" v-if="activeEl?.kind === 'vector'">
-        <span>{{ elName(activeEl) }}</span>
+      <div class="legend">
+        <span>{{ legendLabel }}</span>
         <i :style="{ background: legendCss }" />
-        <span>{{ activeEl?.unit }}</span>
+        <span>{{ legendUnit }}</span>
       </div>
       <div class="clock">
         {{ t("earth.clock", { time: clock }) }}
         <div class="src">{{ source }}</div>
-        <div class="hint">{{ t("earth.hint") }}</div>
+        <div class="hint">{{ overlayHint }}</div>
       </div>
     </aside>
   </div>
@@ -77,9 +97,13 @@
 
 <script setup lang="ts">
 import { paletteCss, type Palette } from "~/utils/colormap"
+import { fieldHasSignal, weatherModelId } from "~/utils/globeOverlay"
 import type { Wind } from "~/utils/windField"
+import { windSpeedField } from "~/utils/windField"
 import type { ScalarField } from "~/utils/rasterField"
 import type { MessageKey } from "~/utils/messages"
+
+const PANEL_KEY = "aetherwatch:earth-panel"
 
 const { t, locale } = useI18n()
 useHead({ title: computed(() => `${t("earth.title")} · AetherWatch`) })
@@ -100,11 +124,27 @@ type GlobeEl = {
   endpoint: string
   palette: Palette
   unit: string
+  overlay?: string
+  overlay_unit?: string
+  overlay_label?: string
+  overlay_label_en?: string
 }
 type ModelChip = { id: string; short: string; kind?: string }
 
 const fallbackElements: GlobeEl[] = [
-  { id: "ocean_current", label: "洋流", label_en: "Currents", kind: "vector", endpoint: "currents", palette: "current", unit: "m/s" },
+  {
+    id: "ocean_current",
+    label: "洋流",
+    label_en: "Currents",
+    kind: "vector",
+    endpoint: "currents",
+    palette: "waves",
+    unit: "s",
+    overlay: "waves",
+    overlay_unit: "s",
+    overlay_label: "波周期",
+    overlay_label_en: "wave period",
+  },
   { id: "wind_speed_10m", label: "风场", label_en: "Wind", kind: "vector", endpoint: "wind", palette: "wind", unit: "m/s" },
   { id: "temperature_2m", label: "气温", label_en: "Temperature", kind: "scalar", endpoint: "field", palette: "thermal", unit: "°C" },
   { id: "surface_pressure", label: "气压", label_en: "Pressure", kind: "scalar", endpoint: "field", palette: "pressure", unit: "hPa" },
@@ -130,6 +170,7 @@ const model = ref("best_match")
 const playing = ref(true)
 const flow = ref<Wind | null>(null)
 const scalar = ref<ScalarField | null>(null)
+const panelOpen = ref(true)
 const srcState = ref<{
   mode: "req-current" | "req-wind" | "req-field" | "live" | "synth" | "down-current" | "down-wind" | "down-field"
   kind?: string
@@ -138,6 +179,7 @@ const srcState = ref<{
 const globeReady = ref(false)
 const clock = computed(() => beijingStamp(scalar.value?.valid_time || undefined, locale.value).clock)
 const loadGen = ref(0)
+const globeFieldBag = ref<{ model: string; fields: Record<string, ScalarField> } | null>(null)
 const source = computed(() => {
   const s = srcState.value
   if (s.mode === "req-current") return t("earth.requestCurrent")
@@ -152,7 +194,20 @@ const source = computed(() => {
 
 const activeEl = computed(() => elements.value.find((e) => e.id === variable.value) || elements.value[0])
 const flowKind = computed(() => (variable.value === "wind_speed_10m" ? "wind" : "current"))
-const legendCss = computed(() => paletteCss(activeEl.value?.palette || "current"))
+const legendCss = computed(() => paletteCss(activeEl.value?.palette || "waves"))
+const legendLabel = computed(() => {
+  const el = activeEl.value
+  if (!el) return ""
+  if (locale.value === "en") return el.overlay_label_en || el.label_en || el.label
+  return el.overlay_label || el.label
+})
+const legendUnit = computed(() => activeEl.value?.overlay_unit || activeEl.value?.unit || "")
+const overlayHint = computed(() => {
+  const id = activeEl.value?.id
+  if (id === "ocean_current") return t("earth.hintCurrents")
+  if (id === "wind_speed_10m") return t("earth.hintWind")
+  return t("earth.hint")
+})
 const modelOptions = computed(() => {
   const extra = ncModels.value
   if (activeEl.value?.endpoint === "currents") return [...marineModels, ...extra.filter((m) => m.kind === "vector")]
@@ -163,6 +218,10 @@ const modelOptions = computed(() => {
 function elName(el?: GlobeEl | null) {
   if (!el) return ""
   return locale.value === "en" ? el.label_en || el.label : el.label
+}
+
+function togglePanel() {
+  panelOpen.value = !panelOpen.value
 }
 
 function selectVariable(id: string) {
@@ -198,6 +257,15 @@ async function loadCatalog() {
   }
 }
 
+async function loadWaves(): Promise<ScalarField | null> {
+  try {
+    const data = await $fetch<ScalarField>(resolveApi("/api/waves"))
+    return fieldHasSignal(data) ? data : null
+  } catch {
+    return null
+  }
+}
+
 async function load() {
   const el = activeEl.value
   if (!el) return
@@ -205,13 +273,16 @@ async function load() {
   const mid = model.value
   if (el.kind === "vector" && el.endpoint === "currents") {
     srcState.value = { mode: "req-current" }
-    scalar.value = null
     try {
-      const data = await $fetch<Wind & { source?: string; fallback?: boolean }>(resolveApi("/api/currents"), {
-        query: { model: mid },
-      })
+      const [data, waves] = await Promise.all([
+        $fetch<Wind & { source?: string; fallback?: boolean }>(resolveApi("/api/currents"), {
+          query: { model: mid },
+        }),
+        loadWaves(),
+      ])
       if (seq !== loadGen.value) return
       flow.value = data
+      scalar.value = waves
       srcState.value = describeSource(elName(el), data)
     } catch {
       if (seq !== loadGen.value) return
@@ -221,49 +292,71 @@ async function load() {
   }
   if (el.kind === "vector") {
     srcState.value = { mode: "req-wind" }
-    scalar.value = null
     try {
       const data = await $fetch<Wind>(resolveApi("/api/wind"), { query: { model: mid } })
       if (seq !== loadGen.value) return
       flow.value = data
+      scalar.value = windSpeedField(data, { oceanOnly: false })
       srcState.value = describeSource(elName(el), data as { source?: string; fallback?: boolean })
     } catch {
       if (seq !== loadGen.value) return
+      flow.value = null
+      scalar.value = null
       srcState.value = { mode: "down-wind" }
     }
     return
   }
   flow.value = null
-  scalar.value = null
   srcState.value = { mode: "req-field", kind: elName(el) }
+  const wm = weatherModelId(mid)
   try {
-    const data = await $fetch<ScalarField>(resolveApi("/api/field"), {
-      query: {
-        model: mid,
-        variable: el.id,
-        west: -180,
-        south: -70,
-        east: 180,
-        north: 70,
-        nx: 16,
-        ny: 10,
-        step: 0,
-      },
-    })
+    const bag = globeFieldBag.value
+    let field: ScalarField | undefined = bag?.model === wm ? bag.fields[el.id] : undefined
+    if (!fieldHasSignal(field)) {
+      const data = await $fetch<{
+        model?: string
+        fields?: Record<string, ScalarField>
+        fallback?: boolean
+        source?: string
+      }>(resolveApi("/api/globe-fields"), { query: { model: wm } })
+      if (seq !== loadGen.value) return
+      globeFieldBag.value = { model: wm, fields: data.fields || {} }
+      field = globeFieldBag.value.fields[el.id]
+    }
     if (seq !== loadGen.value) return
-    scalar.value = data
-    srcState.value = { mode: "live", kind: elName(el), src: (data as { source?: string }).source || "open-meteo" }
+    scalar.value = fieldHasSignal(field) ? field || null : null
+    if (!scalar.value) {
+      srcState.value = { mode: "down-field", kind: elName(el) }
+      return
+    }
+    const src = field?.source || "open-meteo"
+    srcState.value = src.startsWith("synthetic")
+      ? { mode: "synth", kind: elName(el) }
+      : { mode: "live", kind: elName(el), src }
   } catch {
     if (seq !== loadGen.value) return
+    scalar.value = null
     srcState.value = { mode: "down-field", kind: elName(el) }
   }
 }
 
 onMounted(async () => {
+  try {
+    if (import.meta.client && localStorage.getItem(PANEL_KEY) === "0") panelOpen.value = false
+  } catch {
+    /* private mode */
+  }
   await loadCatalog()
   await load()
 })
 watch([variable, model], load)
+watch(panelOpen, (open) => {
+  try {
+    if (import.meta.client) localStorage.setItem(PANEL_KEY, open ? "1" : "0")
+  } catch {
+    /* ignore */
+  }
+})
 
 function describeSource(kind: string, data: { source?: string; fallback?: boolean }) {
   const src = data.source || ""

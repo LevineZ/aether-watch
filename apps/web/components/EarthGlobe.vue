@@ -10,13 +10,21 @@
 <script setup lang="ts">
 import maplibregl from "maplibre-gl"
 import "maplibre-gl/dist/maplibre-gl.css"
-import { restyleGlobe, paintStars } from "~/utils/globeStyle"
+import {
+  applyGlobeBasemap,
+  ensureGlobeLand,
+  globeFallbackStyle,
+  paintStars,
+  restyleGlobe,
+  type GlobeStyleJson,
+} from "~/utils/globeStyle"
 import type { ScalarField } from "~/utils/rasterField"
 import { ScalarFieldLayer, signalPalette } from "~/utils/fieldLayer"
+import { overlayOpacity } from "~/utils/globeOverlay"
 import { WindParticleLayer, type FlowKind } from "~/utils/windLayer"
 import { windSpeedField, type Wind } from "~/utils/windField"
 import type { Palette } from "~/utils/colormap"
-import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_DARK } from "~/utils/mapLabels"
+import { applyPlaceLabels, loadOpenFreeMapStyle } from "~/utils/mapLabels"
 import { applyChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
 
 const props = defineProps<{
@@ -45,25 +53,21 @@ function firstSymbolId(ml: maplibregl.Map) {
 
 function paintOverlay() {
   if (!map?.isStyleLoaded() || !scalarLayer) return
-  if (props.field) {
-    const palette = props.palette || "thermal"
-    scalarLayer.setField(props.field, palette, {
-      signalAlpha: signalPalette(palette),
-      opacity: signalPalette(palette) ? 0.86 : 0.42,
-    })
-    layer?.setVisible(false)
-  } else if (props.flow) {
-    const kind = props.kind || "current"
-    const speed = windSpeedField(props.flow, { oceanOnly: kind === "current" })
-    scalarLayer.setField(speed, kind === "current" ? "current" : "wind", {
-      signalAlpha: false,
-      opacity: kind === "current" ? 0.36 : 0.62,
-    })
-    layer?.setVisible(true)
-  } else {
-    scalarLayer.setField(null, "current")
-    layer?.setVisible(true)
+  const kind = props.kind || "current"
+  const palette = (props.palette || (kind === "current" ? "waves" : "wind")) as Palette
+  let field = props.field || null
+  if (!field && props.flow) {
+    field = windSpeedField(props.flow, { oceanOnly: kind === "current" })
   }
+  if (field) {
+    scalarLayer.setField(field, palette, {
+      signalAlpha: signalPalette(palette),
+      opacity: overlayOpacity(palette, kind),
+    })
+  } else {
+    scalarLayer.setField(null, palette)
+  }
+  layer?.setVisible(!!props.flow)
   raiseChinaBorders(map)
   map.triggerRepaint()
 }
@@ -85,11 +89,11 @@ onMounted(async () => {
   if (props.flow) layer.setField(props.flow, props.kind || "current")
   scalarLayer = new ScalarFieldLayer()
 
-  let style: string | object = OPENFREEMAP_DARK
+  let style: object
   try {
-    style = await loadOpenFreeMapStyle("dark", locale.value)
+    style = applyGlobeBasemap((await loadOpenFreeMapStyle("dark", locale.value)) as GlobeStyleJson)
   } catch {
-    /* URL fallback */
+    style = globeFallbackStyle()
   }
 
   map = new maplibregl.Map({
@@ -111,6 +115,7 @@ onMounted(async () => {
   map.on("style.load", () => {
     if (!map || !layer || !scalarLayer) return
     restyleGlobe(map, locale.value)
+    void ensureGlobeLand(map)
     const before = firstSymbolId(map)
     if (!map.getLayer(scalarLayer.id)) {
       if (before) map.addLayer(scalarLayer, before)
@@ -151,6 +156,7 @@ watch(locale, (lang) => {
   if (map?.isStyleLoaded()) {
     restyleGlobe(map, lang)
     applyPlaceLabels(map, lang)
+    void ensureGlobeLand(map)
     applyChinaBorders(map, "globe")
   }
 })

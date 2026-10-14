@@ -39,7 +39,7 @@
           {{ t("forecast.spatial") }}
           <small>{{ t("forecast.realField", { label: elLabel(currentElement), unit }) }}</small>
         </h2>
-        <span v-if="fieldLoading" class="fbusy" role="status">{{ busyLine }}</span>
+        <span v-if="pageBusy" class="fbusy" role="status">{{ busyLine }}</span>
       </header>
       <div class="tax">
         <div class="tax-top">
@@ -73,7 +73,7 @@
             :field="(fields[id] as never) || null"
             :palette="palette"
             :color="colorOf(id)"
-            :loading="fieldLoading && !fields[id]"
+            :loading="mapBusy(id)"
             :camera="camera"
             :driver-id="cameraDriver"
             :pick="{ lat, lon }"
@@ -127,6 +127,7 @@ import {
   type GeoBbox,
   type MapCamera,
 } from "~/composables/useLinkedCamera"
+import { fieldHasSignal } from "~/utils/globeOverlay"
 import type { ScalarField } from "~/utils/rasterField"
 
 const { t, locale } = useI18n()
@@ -150,6 +151,8 @@ let fieldGen = 0
 const fieldCache = new Map<string, ScalarField>()
 const fieldError = ref("")
 const fieldLoading = ref(false)
+const fieldPending = ref<Record<string, boolean>>({})
+const fieldFailed = ref<Record<string, boolean>>({})
 const seriesLoading = ref(false)
 const seriesError = ref("")
 const chartTimes = ref<string[]>([])
@@ -177,6 +180,14 @@ const busyLine = computed(() =>
     lead: lead.value,
   }),
 )
+/** Header spinner only while no map has paint yet. One slow/429 model must not freeze the page. */
+const pageBusy = computed(() => {
+  const ids = mapsToShow.value
+  if (!ids.length) return false
+  const anyPainted = ids.some((id) => fieldHasSignal(fields.value[id]))
+  if (anyPainted) return false
+  return ids.some((id) => fieldPending.value[id] || fieldLoading.value)
+})
 
 function elLabel(el?: Element | null) {
   if (!el) return ""
@@ -330,16 +341,17 @@ async function loadSeries() {
   }
 }
 
-const COARSE_NX = 8
-const COARSE_NY = 6
-
-function fieldKey(id: string, bbox: GeoBbox, nx?: number, ny?: number) {
-  const grid = nx && ny ? `${nx}x${ny}` : "def"
-  return `${id}|${variable.value}|${lead.value}|${bbox.west}|${bbox.south}|${bbox.east}|${bbox.north}|${grid}`
+function fieldKey(id: string, bbox: GeoBbox) {
+  return `${id}|${variable.value}|${lead.value}|${bbox.west}|${bbox.south}|${bbox.east}|${bbox.north}|def`
 }
 
-function fieldCells(field?: ScalarField | null) {
-  return field?.values?.[0]?.length || field?.nx || 0
+function mapBusy(id: string) {
+  return !!fieldPending.value[id] && !fields.value[id] && !fieldFailed.value[id]
+}
+
+function fieldErrorText(e: unknown) {
+  if (e instanceof Error && e.message && e.message !== "empty-field") return e.message
+  return t("forecast.fieldFail")
 }
 
 function rememberField(key: string, data: ScalarField) {
@@ -347,14 +359,10 @@ function rememberField(key: string, data: ScalarField) {
   if (fieldCache.size > 64) fieldCache.delete(fieldCache.keys().next().value as string)
 }
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-async function fetchFieldOnce(id: string, bbox: GeoBbox, nx?: number, ny?: number) {
-  const key = fieldKey(id, bbox, nx, ny)
+async function fetchFieldOnce(id: string, bbox: GeoBbox) {
+  const key = fieldKey(id, bbox)
   const cached = fieldCache.get(key)
-  if (cached) return cached
+  if (cached && fieldHasSignal(cached)) return cached
   const query: Record<string, string | number> = {
     model: id,
     variable: variable.value,
@@ -364,70 +372,72 @@ async function fetchFieldOnce(id: string, bbox: GeoBbox, nx?: number, ny?: numbe
     east: bbox.east,
     north: bbox.north,
   }
-  if (nx) query.nx = nx
-  if (ny) query.ny = ny
-  const data = await $fetch<ScalarField>(resolveApi("/api/field"), { query })
+  const data = await $fetch<ScalarField>(resolveApi("/api/field"), { query, timeout: 12000 })
+  if (!fieldHasSignal(data)) {
+    throw new Error("empty-field")
+  }
   rememberField(key, data)
   return data
 }
 
-async function fetchFieldBackoff(id: string, bbox: GeoBbox, nx?: number, ny?: number) {
-  let last: unknown
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      return await fetchFieldOnce(id, bbox, nx, ny)
-    } catch (e) {
-      last = e
-      await sleep(Math.min(8000, 350 * 2 ** attempt))
-    }
-  }
-  throw last
-}
-
 async function loadFields() {
   fieldError.value = ""
-  fieldLoading.value = true
   const gen = ++fieldGen
   const bbox = viewBbox.value || CHINA_BBOX
   const ids = mapsToShow.value
   const kept: Record<string, ScalarField> = {}
+  const failed: Record<string, boolean> = {}
+  const pending: Record<string, boolean> = {}
   for (const id of ids) {
-    if (fields.value[id]) kept[id] = fields.value[id]
+    pending[id] = true
+    const prev = fields.value[id]
+    if (prev && fieldHasSignal(prev) && prev.variable === variable.value) kept[id] = prev
   }
   fields.value = kept
+  fieldFailed.value = failed
+  fieldPending.value = pending
+  fieldLoading.value = true
 
-  // Coarse coating first (parallel). Server still serializes Open-Meteo.
-  await Promise.all(
-    ids.map(async (id) => {
-      try {
-        const data = await fetchFieldBackoff(id, bbox, COARSE_NX, COARSE_NY)
-        if (gen !== fieldGen) return
-        const cur = fields.value[id]
-        if (cur && fieldCells(cur) > COARSE_NX) return
-        fields.value = { ...fields.value, [id]: data }
-      } catch (e: unknown) {
-        if (gen !== fieldGen) return
-        fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
-      }
-    }),
-  )
-  if (gen !== fieldGen) return
-
-  // Refine one model at a time so four 20×15 grids do not enqueue together.
-  for (const id of ids) {
+  const markDone = (id: string) => {
     if (gen !== fieldGen) return
-    try {
-      const data = await fetchFieldBackoff(id, bbox)
-      if (gen !== fieldGen) return
-      fields.value = { ...fields.value, [id]: data }
-    } catch (e: unknown) {
-      if (gen !== fieldGen) return
-      if (!fields.value[id]) {
-        fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
-      }
+    pending[id] = false
+    fieldPending.value = { ...fieldPending.value, [id]: false }
+    if (ids.some((item) => fieldHasSignal(fields.value[item])) || ids.every((item) => !pending[item])) {
+      fieldLoading.value = false
     }
   }
-  if (gen === fieldGen) fieldLoading.value = false
+
+  try {
+    // Default 20×15 (omit nx/ny) so Redis field:v4 GFS/IFS/AIFS keys hit. One slow model cannot block the rest.
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const data = await fetchFieldOnce(id, bbox)
+          if (gen !== fieldGen) return
+          fields.value = { ...fields.value, [id]: data }
+          if (fieldFailed.value[id]) {
+            const next = { ...fieldFailed.value }
+            delete next[id]
+            fieldFailed.value = next
+          }
+        } catch (e: unknown) {
+          if (gen !== fieldGen) return
+          if (!fields.value[id]) {
+            failed[id] = true
+            fieldFailed.value = { ...fieldFailed.value, [id]: true }
+            fieldError.value = fieldErrorText(e)
+          }
+        } finally {
+          markDone(id)
+        }
+      }),
+    )
+  } finally {
+    if (gen === fieldGen) {
+      fieldLoading.value = false
+      fieldPending.value = {}
+    }
+  }
 }
 
 let seriesTimer: ReturnType<typeof setTimeout> | null = null
@@ -436,15 +446,27 @@ function debounceSeries() {
   seriesTimer = setTimeout(loadSeries, 250)
 }
 
+let fieldsTimer: ReturnType<typeof setTimeout> | null = null
+function debounceFields() {
+  if (fieldsTimer) clearTimeout(fieldsTimer)
+  fieldsTimer = setTimeout(() => {
+    void loadFields()
+  }, 180)
+}
+
 onMounted(async () => {
   await loadCatalog()
   await Promise.all([loadSeries(), loadFields()])
 })
-onBeforeUnmount(stopPlay)
+onBeforeUnmount(() => {
+  stopPlay()
+  if (fieldsTimer) clearTimeout(fieldsTimer)
+  if (seriesTimer) clearTimeout(seriesTimer)
+})
 watch([variable, () => selected.value.join(",")], () => {
   debounceSeries()
-  loadFields()
+  void loadFields()
 })
-watch(leadIndex, loadFields)
+watch(leadIndex, debounceFields)
 watch([lat, lon], debounceSeries)
 </script>

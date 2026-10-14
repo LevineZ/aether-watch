@@ -1,8 +1,98 @@
 import type { Map as MlMap } from "maplibre-gl"
-import { classifyBoundaryLayer } from "~/utils/chinaBorders"
-import { applyPlaceLabels, isPlaceLabelLayer, type LabelLang } from "~/utils/mapLabels"
+import { classifyBoundaryLayer } from "./chinaBorders"
+import {
+  applyGlobeBasemap,
+  GLOBE_LAND_FILL,
+  GLOBE_LAND_GEO_URLS,
+  GLOBE_LAND_LAYER,
+  GLOBE_LAND_SOURCE,
+  GLOBE_OCEAN,
+  globeFallbackStyle,
+  globeLandLayerSpec,
+  landInsertBeforeId,
+  type GlobeStyleJson,
+  type LayerHint,
+} from "./globeLand"
+import { applyPlaceLabels, isPlaceLabelLayer, type LabelLang } from "./mapLabels"
 
-/** Strip streets/POIs and darken water so the globe reads as space + ocean. */
+export {
+  applyGlobeBasemap,
+  GLOBE_LAND_FILL,
+  GLOBE_LAND_GEO_URLS,
+  GLOBE_LAND_LAYER,
+  GLOBE_LAND_SOURCE,
+  GLOBE_OCEAN,
+  globeFallbackStyle,
+  globeLandLayerSpec,
+  landInsertBeforeId,
+}
+export type { GlobeStyleJson, LayerHint }
+
+type GeoFC = { type: string; features: unknown[] }
+
+let landCache: GeoFC | null = null
+let landInflight: Promise<GeoFC | null> | null = null
+
+export async function loadGlobeLand(): Promise<GeoFC | null> {
+  if (landCache) return landCache
+  if (landInflight) return landInflight
+  landInflight = (async () => {
+    for (const url of GLOBE_LAND_GEO_URLS) {
+      try {
+        const res = await fetch(url)
+        if (!res.ok) continue
+        const data = (await res.json()) as GeoFC
+        if (data?.features?.length) {
+          landCache = data
+          return data
+        }
+      } catch {
+        /* try next */
+      }
+    }
+    return null
+  })()
+  try {
+    return await landInflight
+  } finally {
+    landInflight = null
+  }
+}
+
+/** Guarantee land fill even if the style JSON URL 404s; prefers local geo then API. */
+export async function ensureGlobeLand(map: MlMap) {
+  const data = await loadGlobeLand()
+  if (!data || !map.getStyle()) return
+  const existing = map.getSource(GLOBE_LAND_SOURCE) as { setData?: (d: unknown) => void } | undefined
+  if (existing?.setData) {
+    try {
+      existing.setData(data)
+    } catch {
+      /* source not ready */
+    }
+  } else if (!existing) {
+    map.addSource(GLOBE_LAND_SOURCE, { type: "geojson", data: data as never })
+  }
+  if (map.getLayer(GLOBE_LAND_LAYER)) {
+    try {
+      map.setPaintProperty(GLOBE_LAND_LAYER, "fill-color", GLOBE_LAND_FILL)
+      map.setPaintProperty(GLOBE_LAND_LAYER, "fill-opacity", 1)
+    } catch {
+      /* paint mismatch */
+    }
+    return
+  }
+  const before = landInsertBeforeId((map.getStyle()?.layers || []) as LayerHint[])
+  const spec = globeLandLayerSpec()
+  try {
+    if (before && map.getLayer(before)) map.addLayer(spec as never, before)
+    else map.addLayer(spec as never)
+  } catch {
+    /* style reload race */
+  }
+}
+
+/** Strip streets/POIs and paint ocean + land so the globe reads as space + ocean, not black continents. */
 export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
   try {
     map.setProjection({ type: "globe" })
@@ -56,12 +146,15 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
         continue
       }
       if (type === "background") {
-        map.setPaintProperty(id, "background-color", "#05070d")
+        map.setPaintProperty(id, "background-color", GLOBE_OCEAN)
         continue
       }
       if (type === "fill" || type === "fill-extrusion") {
-        if (src.includes("water") || src.includes("ocean") || src.includes("sea")) {
-          map.setPaintProperty(id, "fill-color", "#071624")
+        if (id === GLOBE_LAND_LAYER || src.includes("aw-globe-land")) {
+          map.setPaintProperty(id, "fill-color", GLOBE_LAND_FILL)
+          if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
+        } else if (src.includes("water") || src.includes("ocean") || src.includes("sea")) {
+          map.setPaintProperty(id, "fill-color", GLOBE_OCEAN)
           if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
         } else if (src.includes("building")) {
           map.setLayoutProperty(id, "visibility", "none")
@@ -69,7 +162,7 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
           map.setPaintProperty(id, "fill-color", "#223244")
           map.setPaintProperty(id, "fill-opacity", 0.9)
         } else if (src.includes("land")) {
-          map.setPaintProperty(id, "fill-color", "#2a3b4e")
+          map.setPaintProperty(id, "fill-color", GLOBE_LAND_FILL)
           if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
         }
       }

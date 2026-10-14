@@ -19,13 +19,26 @@ import httpx
 import numpy as np
 import redis.asyncio as redis
 
-from app.catalog import CHINA_BBOX, CHINA_SEAS_BBOX, CURRENT_BY_ID, ELEMENT_BY_ID, PREVIEW_BY_ID
+from app.catalog import (
+    CHINA_BBOX,
+    CHINA_SEAS_BBOX,
+    CURRENT_BY_ID,
+    ELEMENT_BY_ID,
+    GLOBE_BBOX,
+    GLOBE_SCALAR_VARS,
+    PREVIEW_BY_ID,
+    weather_model_id,
+)
 from app.config import settings
 from app.fieldmeta import field_clock
 from app.landmask import apply_ocean_mask, is_land
 
 USER_AGENT = "AetherWatch/0.1 (local observation; docker compose)"
 log = logging.getLogger("aetherwatch.openmeteo")
+
+
+class OpenMeteoRateLimit(RuntimeError):
+    """Open-Meteo 429 after a short backoff. Callers must serve last-good instead of waiting."""
 
 _http: httpx.AsyncClient | None = None
 _redis: redis.Redis | None = None
@@ -151,7 +164,27 @@ async def cache_get_prefer(key: str) -> Any | None:
     return last
 
 
-LIVE_PREFIXES = ("field:", "currents:", "wind:", "series:", "catalog:")
+async def last_good_on_rate_limit(key: str, *, reason: str = "open-meteo-429") -> dict[str, Any] | None:
+    """Redis live or :last copy, tagged so the UI can keep painting instead of spinning."""
+    stale = await cache_get_prefer(key)
+    if not stale:
+        return None
+    stale["cached"] = True
+    stale["stale"] = True
+    stale["degraded"] = reason
+    return stale
+
+
+LIVE_PREFIXES = (
+    "field:",
+    "currents:",
+    "wind:",
+    "series:",
+    "catalog:",
+    "waves:",
+    "globe-fields:",
+    "china-fields:",
+)
 
 
 async def flush_live_cache() -> int:
@@ -299,6 +332,8 @@ async def _gather_batches(
         async with gate:
             try:
                 group = await fetch_chunk(chunk)
+            except OpenMeteoRateLimit:
+                raise
             except Exception:
                 group = [None] * len(chunk)
         out.extend(group)
@@ -306,9 +341,9 @@ async def _gather_batches(
 
 
 async def _om_json(client: httpx.AsyncClient, url: str, params: dict[str, str]) -> Any:
-    """POST first (large multi-location bodies); GET fallback; exponential 429 backoff."""
+    """POST first (large multi-location bodies); GET fallback; short 429 backoff then last-good."""
     last: Exception | None = None
-    retries = max(2, settings.open_meteo_max_retries)
+    retries = max(1, int(settings.open_meteo_max_retries))
     for attempt in range(1, retries + 1):
         await pace_open_meteo()
         try:
@@ -316,21 +351,29 @@ async def _om_json(client: httpx.AsyncClient, url: str, params: dict[str, str]) 
             if r.status_code not in (200, 429) and r.status_code < 500:
                 r = await client.get(url, params=params)
             if r.status_code == 429:
+                last = OpenMeteoRateLimit("open-meteo 429")
+                if attempt >= retries:
+                    break
                 wait = retry_wait_seconds(attempt, r.headers.get("Retry-After"))
                 log.warning("open-meteo 429 on %s — backing off %.1fs (attempt %s/%s)", url, wait, attempt, retries)
                 await asyncio.sleep(wait)
-                last = RuntimeError("open-meteo 429")
                 continue
             if r.status_code >= 500:
+                last = RuntimeError(f"open-meteo {r.status_code}")
+                if attempt >= retries:
+                    break
                 wait = retry_wait_seconds(attempt)
                 log.warning("open-meteo %s on %s — retry in %.1fs", r.status_code, url, wait)
                 await asyncio.sleep(wait)
-                last = RuntimeError(f"open-meteo {r.status_code}")
                 continue
             r.raise_for_status()
             return r.json()
+        except OpenMeteoRateLimit:
+            raise
         except Exception as exc:
             last = exc
+            if attempt >= retries:
+                break
             await asyncio.sleep(retry_wait_seconds(attempt, jitter=True) * 0.35)
     if last:
         raise last
@@ -343,6 +386,148 @@ def _grid_points(bbox: dict[str, float], nx: int, ny: int) -> tuple[list[float],
     return lats, lons
 
 
+def _is_globe_bbox(bbox: dict[str, float]) -> bool:
+    return float(bbox.get("east", 0) - bbox.get("west", 0)) >= 300.0
+
+
+def field_cache_key(
+    model: str,
+    om_var: str,
+    bbox: dict[str, float],
+    nx: int,
+    ny: int,
+    step: int = 0,
+) -> str:
+    return (
+        f"field:v4:{model}:{om_var}:{bbox['west']}:{bbox['south']}:{bbox['east']}:{bbox['north']}"
+        f":{int(nx)}x{int(ny)}:{int(step)}"
+    )
+
+
+def _scalar_payload(
+    variable: str,
+    model: str,
+    bbox: dict[str, float],
+    lats: list[float],
+    lons: list[float],
+    values: np.ndarray,
+    *,
+    init_time: str | None = None,
+    valid_time: str | None = None,
+    step: int = 0,
+    source: str | None = None,
+    provider: str = "open-meteo",
+    kind: str = "model_forecast",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    element = ELEMENT_BY_ID.get(variable) or {
+        "unit": "",
+        "label": variable,
+        "label_en": variable,
+    }
+    finite = values[np.isfinite(values)]
+    lo = float(np.min(finite)) if finite.size else (vmin if vmin is not None else 0.0)
+    hi = float(np.max(finite)) if finite.size else (vmax if vmax is not None else 1.0)
+    if vmin is not None:
+        lo = float(vmin)
+    if vmax is not None:
+        hi = float(vmax)
+    if hi <= lo:
+        hi = lo + 1.0
+    out: dict[str, Any] = {
+        "model": model,
+        "model_id": model,
+        "variable": variable,
+        "unit": element.get("unit", ""),
+        "label": element.get("label", variable),
+        "label_en": element.get("label_en", variable),
+        "init_time": init_time,
+        "valid_time": valid_time,
+        "lead_hours": step,
+        "step": step,
+        "kind": kind,
+        "provider": provider,
+        "bbox": bbox,
+        "lats": [float(x) for x in lats],
+        "lons": [float(x) for x in lons],
+        "values": [[None if not math.isfinite(v) else round(float(v), 3) for v in row] for row in values],
+        "min": round(lo, 3),
+        "max": round(hi, 3),
+        "source": source or f"open-meteo:{model}",
+        "source_note": "near-real-time numerical model forecast, not station observations",
+        "cached": False,
+        "nx": int(values.shape[1]),
+        "ny": int(values.shape[0]),
+        "filled": int(finite.size),
+        "fallback": str(source or "").startswith("synthetic"),
+    }
+    if extra:
+        out.update(extra)
+    return out
+
+
+def synthetic_globe_field(
+    variable: str,
+    nx: int,
+    ny: int,
+    bbox: dict[str, float] | None = None,
+    reason: str = "fallback",
+) -> dict[str, Any]:
+    """Latitude-band climatology so the globe is never a blank basemap."""
+    bbox = bbox or GLOBE_BBOX
+    lats, lons = _grid_points(bbox, nx, ny)
+    lat_g = np.array(lats)[:, None]
+    lon_g = np.array(lons)[None, :]
+    rad = np.radians(lat_g)
+    if variable == "surface_pressure":
+        values = 1013.25 - 11.0 * np.cos(2.0 * rad) + 1.4 * np.sin(np.radians(lon_g) * 2.0)
+        vmin, vmax = 980.0, 1040.0
+        unit_var = "surface_pressure"
+    elif variable == "precipitation":
+        itcz = np.exp(-((lat_g) ** 2) / 85.0)
+        monsoon = 0.45 * np.exp(-((lat_g - 18.0) ** 2) / 140.0) * (0.5 + 0.5 * np.cos(np.radians(lon_g - 95.0)))
+        values = 6.5 * itcz + 3.2 * monsoon
+        vmin, vmax = 0.0, 12.0
+        unit_var = "precipitation"
+    else:
+        values = 30.0 * np.cos(rad) - 4.0 + 2.2 * np.sin(np.radians(lon_g))
+        vmin, vmax = -30.0, 40.0
+        unit_var = "temperature_2m"
+    return _scalar_payload(
+        unit_var if variable not in ELEMENT_BY_ID else variable,
+        "synthetic",
+        bbox,
+        lats,
+        lons,
+        np.asarray(values, dtype=float),
+        source=f"synthetic:{reason}",
+        provider="synthetic",
+        kind="synthetic",
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+
+def _read_hourly_value(payload: dict[str, Any], om_var: str, model: str, step: int = 0) -> float | None:
+    hourly = payload.get("hourly") or {}
+    key = _hourly_key(om_var, model, payload)
+    series = hourly.get(key)
+    if series is None and om_var == "surface_pressure":
+        series = hourly.get("pressure_msl") or hourly.get(f"pressure_msl_{model}")
+    if not series:
+        return None
+    si = min(max(step, 0), len(series) - 1)
+    val = series[si]
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
 async def fetch_field(
     model: str,
     variable: str,
@@ -352,14 +537,19 @@ async def fetch_field(
     step: int = 0,
 ) -> dict[str, Any]:
     bbox = bbox or CHINA_BBOX
-    nx = int(nx or settings.field_nx)
-    ny = int(ny or settings.field_ny)
+    globe = _is_globe_bbox(bbox)
+    if globe:
+        model = weather_model_id(model)
+        nx = int(nx or settings.globe_field_nx)
+        ny = int(ny or settings.globe_field_ny)
+    else:
+        nx = int(nx or settings.field_nx)
+        ny = int(ny or settings.field_ny)
+        if model not in PREVIEW_BY_ID:
+            model = weather_model_id(model)
     element = ELEMENT_BY_ID.get(variable, ELEMENT_BY_ID["temperature_2m"])
     om_var = element["om"]
-    cache_key = (
-        f"field:v4:{model}:{om_var}:{bbox['west']}:{bbox['south']}:{bbox['east']}:{bbox['north']}"
-        f":{nx}x{ny}:{step}"
-    )
+    cache_key = field_cache_key(model, om_var, bbox, nx, ny, step)
     hit = await cache_get_prefer(cache_key)
     if hit:
         hit["cached"] = True
@@ -372,6 +562,7 @@ async def fetch_field(
     values = np.full((ny, nx), np.nan, dtype=float)
     init_time: str | None = None
     valid_time: str | None = None
+    days = "1" if globe and step == 0 else "6"
 
     async def batch(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
         lat_s = ",".join(f"{p[0]:.3f}" for p in chunk)
@@ -381,74 +572,265 @@ async def fetch_field(
             "longitude": lon_s,
             "hourly": om_var if om_var != "surface_pressure" else "surface_pressure,pressure_msl",
             "models": model,
-            "forecast_days": "6",
+            "forecast_days": days,
             "timezone": "UTC",
             "wind_speed_unit": "ms",
         }
         url = f"{settings.open_meteo_base.rstrip('/')}/v1/forecast"
         data = await _om_json(client, url, params)
-        # multi-location returns a list; single returns an object
         if isinstance(data, list):
             return data
         return [data]
 
-    payloads = await _gather_batches(points, batch)
+    try:
+        payloads = await _gather_batches(points, batch)
+    except OpenMeteoRateLimit:
+        stale = await last_good_on_rate_limit(cache_key)
+        if stale:
+            return stale
+        if globe:
+            return synthetic_globe_field(variable, nx, ny, bbox, reason="open-meteo-429")
+        raise
 
     for idx, payload in enumerate(payloads):
         if not payload:
             continue
         hourly = payload.get("hourly") or {}
         times = hourly.get("time") or []
-        key = _hourly_key(om_var, model, payload)
-        series = hourly.get(key)
-        if series is None and om_var == "surface_pressure":
-            series = hourly.get("pressure_msl") or hourly.get(f"pressure_msl_{model}")
-        if not series:
-            continue
-        si = min(max(step, 0), len(series) - 1)
-        val = series[si]
+        val = _read_hourly_value(payload, om_var, model, step)
         if times and valid_time is None:
             init_time, valid_time = field_clock(times, step)
+        if val is None:
+            continue
         row = idx // nx
         col = idx % nx
-        if val is not None:
-            values[row, col] = float(val)
+        values[row, col] = val
 
     finite = values[np.isfinite(values)]
-    vmin = float(np.min(finite)) if finite.size else 0.0
-    vmax = float(np.max(finite)) if finite.size else 1.0
-    out = {
-        "model": model,
-        "model_id": model,
-        "variable": variable,
-        "unit": element["unit"],
-        "label": element["label"],
-        "label_en": element["label_en"],
-        "init_time": init_time,
-        "valid_time": valid_time,
-        "lead_hours": step,
-        "step": step,
-        "kind": "model_forecast",
-        "provider": "open-meteo",
-        "bbox": bbox,
-        "lats": lats,
-        "lons": lons,
-        "values": [[None if not math.isfinite(v) else round(float(v), 3) for v in row] for row in values],
-        "min": round(vmin, 3),
-        "max": round(vmax, 3),
-        "source": f"open-meteo:{model}",
-        "source_note": "near-real-time numerical model forecast, not station observations",
-        "cached": False,
-        "nx": nx,
-        "ny": ny,
-    }
-    if finite.size:
-        await cache_remember(cache_key, out, settings.cache_ttl_seconds)
-    else:
+    if not finite.size:
         stale = await cache_get_prefer(cache_key)
         if stale:
             stale["cached"] = True
             return stale
+        if globe:
+            return synthetic_globe_field(variable, nx, ny, bbox, reason="open-meteo-sparse")
+        out = _scalar_payload(
+            variable, model, bbox, lats, lons, values, init_time=init_time, valid_time=valid_time, step=step
+        )
+        return out
+
+    out = _scalar_payload(
+        variable, model, bbox, lats, lons, values, init_time=init_time, valid_time=valid_time, step=step
+    )
+    await cache_remember(cache_key, out, settings.cache_ttl_seconds)
+    return out
+
+
+async def fetch_globe_fields(model: str = "gfs_seamless") -> dict[str, Any]:
+    """One Open-Meteo pass for globe 气温/气压/降水. Coarse grid, cached, synthetic fallback."""
+    model = weather_model_id(model)
+    bbox = dict(GLOBE_BBOX)
+    nx = int(settings.globe_field_nx)
+    ny = int(settings.globe_field_ny)
+    cache_key = f"globe-fields:v1:{model}:{nx}x{ny}:0"
+    hit = await cache_get_prefer(cache_key)
+    if hit:
+        hit["cached"] = True
+        return hit
+
+    lats, lons = _grid_points(bbox, nx, ny)
+    points: list[tuple[float, float]] = [(lat, lon) for lat in lats for lon in lons]
+    grids = {var: np.full((ny, nx), np.nan, dtype=float) for var in GLOBE_SCALAR_VARS}
+    init_time: str | None = None
+    valid_time: str | None = None
+    client = await http()
+
+    async def batch(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
+        lat_s = ",".join(f"{p[0]:.3f}" for p in chunk)
+        lon_s = ",".join(f"{p[1]:.3f}" for p in chunk)
+        params = {
+            "latitude": lat_s,
+            "longitude": lon_s,
+            "hourly": "temperature_2m,surface_pressure,pressure_msl,precipitation",
+            "models": model,
+            "forecast_days": "1",
+            "timezone": "UTC",
+            "wind_speed_unit": "ms",
+        }
+        data = await _om_json(client, f"{settings.open_meteo_base.rstrip('/')}/v1/forecast", params)
+        return data if isinstance(data, list) else [data]
+
+    try:
+        payloads = await _gather_batches(points, batch)
+    except OpenMeteoRateLimit:
+        stale = await last_good_on_rate_limit(cache_key)
+        if stale:
+            return stale
+        return {
+            "model": model,
+            "model_id": model,
+            "fields": {
+                var: synthetic_globe_field(var, nx, ny, bbox, reason="open-meteo-429") for var in GLOBE_SCALAR_VARS
+            },
+            "source": "synthetic:open-meteo-429",
+            "cached": False,
+            "nx": nx,
+            "ny": ny,
+            "bbox": bbox,
+            "fallback": True,
+            "degraded": "open-meteo-429",
+        }
+
+    for idx, payload in enumerate(payloads):
+        if not payload:
+            continue
+        hourly = payload.get("hourly") or {}
+        times = hourly.get("time") or []
+        if times and valid_time is None:
+            init_time, valid_time = field_clock(times, 0)
+        row = idx // nx
+        col = idx % nx
+        for var in GLOBE_SCALAR_VARS:
+            om_var = ELEMENT_BY_ID[var]["om"]
+            val = _read_hourly_value(payload, om_var, model, 0)
+            if val is not None:
+                grids[var][row, col] = val
+
+    fields: dict[str, Any] = {}
+    live = False
+    for var, arr in grids.items():
+        packed = _scalar_payload(
+            var, model, bbox, lats, lons, arr, init_time=init_time, valid_time=valid_time, step=0
+        )
+        if int(packed.get("filled") or 0) < 8:
+            packed = synthetic_globe_field(var, nx, ny, bbox, reason="open-meteo-sparse")
+        else:
+            live = True
+        fields[var] = packed
+
+    out = {
+        "model": model,
+        "model_id": model,
+        "fields": fields,
+        "source": f"open-meteo:{model}",
+        "cached": False,
+        "nx": nx,
+        "ny": ny,
+        "bbox": bbox,
+        "fallback": not live,
+    }
+    if live:
+        await cache_remember(cache_key, out, settings.cache_ttl_seconds)
+        await _write_through_field_keys(model, bbox, nx, ny, 0, fields)
+    return out
+
+
+async def _write_through_field_keys(
+    model: str,
+    bbox: dict[str, float],
+    nx: int,
+    ny: int,
+    step: int,
+    fields: dict[str, Any],
+) -> None:
+    """So /api/field?west=-180&nx=16 hits Redis after a globe-fields / china-fields warm."""
+    for var, packed in fields.items():
+        element = ELEMENT_BY_ID.get(var)
+        if not element:
+            continue
+        if int(packed.get("filled") or 0) < 8:
+            continue
+        if str(packed.get("source") or "").startswith("synthetic"):
+            continue
+        key = field_cache_key(model, element["om"], bbox, nx, ny, step)
+        await cache_remember(key, packed, settings.cache_ttl_seconds)
+
+
+async def fetch_china_fields(
+    model: str = "gfs_seamless",
+    nx: int | None = None,
+    ny: int | None = None,
+) -> dict[str, Any]:
+    """One Open-Meteo pass for forecast China 气温/气压/降水 (step 0). Write-through field:v4."""
+    model = weather_model_id(model)
+    bbox = dict(CHINA_BBOX)
+    nx = int(nx or settings.field_nx)
+    ny = int(ny or settings.field_ny)
+    cache_key = f"china-fields:v1:{model}:{nx}x{ny}:0"
+    hit = await cache_get_prefer(cache_key)
+    if hit:
+        hit["cached"] = True
+        return hit
+
+    lats, lons = _grid_points(bbox, nx, ny)
+    points: list[tuple[float, float]] = [(lat, lon) for lat in lats for lon in lons]
+    grids = {var: np.full((ny, nx), np.nan, dtype=float) for var in GLOBE_SCALAR_VARS}
+    init_time: str | None = None
+    valid_time: str | None = None
+    client = await http()
+
+    async def batch(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
+        lat_s = ",".join(f"{p[0]:.3f}" for p in chunk)
+        lon_s = ",".join(f"{p[1]:.3f}" for p in chunk)
+        params = {
+            "latitude": lat_s,
+            "longitude": lon_s,
+            "hourly": "temperature_2m,surface_pressure,pressure_msl,precipitation",
+            "models": model,
+            "forecast_days": "6",
+            "timezone": "UTC",
+            "wind_speed_unit": "ms",
+        }
+        data = await _om_json(client, f"{settings.open_meteo_base.rstrip('/')}/v1/forecast", params)
+        return data if isinstance(data, list) else [data]
+
+    try:
+        payloads = await _gather_batches(points, batch)
+    except OpenMeteoRateLimit:
+        stale = await last_good_on_rate_limit(cache_key)
+        if stale:
+            return stale
+        raise
+
+    for idx, payload in enumerate(payloads):
+        if not payload:
+            continue
+        hourly = payload.get("hourly") or {}
+        times = hourly.get("time") or []
+        if times and valid_time is None:
+            init_time, valid_time = field_clock(times, 0)
+        row = idx // nx
+        col = idx % nx
+        for var in GLOBE_SCALAR_VARS:
+            om_var = ELEMENT_BY_ID[var]["om"]
+            val = _read_hourly_value(payload, om_var, model, 0)
+            if val is not None:
+                grids[var][row, col] = val
+
+    fields: dict[str, Any] = {}
+    live = False
+    for var, arr in grids.items():
+        packed = _scalar_payload(
+            var, model, bbox, lats, lons, arr, init_time=init_time, valid_time=valid_time, step=0
+        )
+        if int(packed.get("filled") or 0) >= 8:
+            live = True
+        fields[var] = packed
+
+    out = {
+        "model": model,
+        "model_id": model,
+        "fields": fields,
+        "source": f"open-meteo:{model}",
+        "cached": False,
+        "nx": nx,
+        "ny": ny,
+        "bbox": bbox,
+        "fallback": not live,
+    }
+    if live:
+        await cache_remember(cache_key, out, settings.cache_ttl_seconds)
+        await _write_through_field_keys(model, bbox, nx, ny, 0, fields)
     return out
 
 
@@ -599,16 +981,131 @@ def _fill_ocean_gaps(u: np.ndarray, v: np.ndarray, bbox: dict[str, float]) -> No
             break
 
 
+def _marine_cell_ok(payload: dict[str, Any], req_lat: float, req_lon: float) -> bool:
+    act_lat = payload.get("latitude")
+    act_lon = payload.get("longitude")
+    if act_lat is None or act_lon is None:
+        return True
+    dlat = float(act_lat) - req_lat
+    dlon = ((float(act_lon) - req_lon + 180.0) % 360.0) - 180.0
+    dist = math.hypot(dlat, dlon * math.cos(math.radians(req_lat)))
+    return dist <= 1.35
+
+
+def _wave_period_value(payload: dict[str, Any], marine_model: str) -> float | None:
+    hourly = payload.get("hourly") or {}
+    for name in ("wave_peak_period", "wave_period", "swell_wave_peak_period", "wind_wave_peak_period"):
+        key = _hourly_key(name, marine_model, payload)
+        series = hourly.get(key) or hourly.get(name)
+        if not series:
+            continue
+        val = series[0]
+        if val is None:
+            continue
+        try:
+            period = float(val)
+        except (TypeError, ValueError):
+            continue
+        if 1.0 <= period <= 40.0:
+            return period
+    return None
+
+
+WAVE_VMIN = 4.0
+WAVE_VMAX = 16.0
+
+
+def wave_cache_key(nx: int, ny: int) -> str:
+    return f"waves:v1:{int(nx)}x{int(ny)}"
+
+
+def wave_grid_to_scalar(
+    wave_north_south: np.ndarray,
+    bbox: dict[str, float],
+    source: str,
+    *,
+    init_time: str | None = None,
+    valid_time: str | None = None,
+) -> dict[str, Any]:
+    """Vector patches are north→south; scalar overlays are south→north with land as null."""
+    ny, nx = wave_north_south.shape
+    values = np.asarray(wave_north_south, dtype=float)[::-1].copy()
+    lats, lons = _grid_points(bbox, nx, ny)
+    for j, lat in enumerate(lats):
+        for i, lon in enumerate(lons):
+            if is_land(float(lon), float(lat)):
+                values[j, i] = np.nan
+    return _scalar_payload(
+        "wave_peak_period",
+        "best_match",
+        bbox,
+        lats,
+        lons,
+        values,
+        init_time=init_time,
+        valid_time=valid_time,
+        source=source,
+        provider="open-meteo-marine",
+        kind="wave_period",
+        vmin=WAVE_VMIN,
+        vmax=WAVE_VMAX,
+        extra={"unit": "s", "label": "波周期", "label_en": "peak wave period"},
+    )
+
+
+def synthetic_wave_field(
+    nx: int,
+    ny: int,
+    bbox: dict[str, float] | None = None,
+    reason: str = "fallback",
+) -> dict[str, Any]:
+    """Swell-ish period: longer in the Southern Ocean / extra-tropics, shorter on the equator."""
+    bbox = bbox or GLOBE_BBOX
+    lats, lons = _grid_points(bbox, nx, ny)
+    values = np.full((ny, nx), np.nan, dtype=float)
+    for j, lat in enumerate(lats):
+        for i, lon in enumerate(lons):
+            if is_land(float(lon), float(lat)):
+                continue
+            extra = 6.0 * min(1.0, max(0.0, (abs(lat) - 8.0) / 48.0))
+            pacific = 1.8 * math.exp(-(((lon - 170.0 + 180.0) % 360.0 - 180.0) ** 2) / 2200.0)
+            values[j, i] = 6.2 + extra + pacific
+    return _scalar_payload(
+        "wave_peak_period",
+        "synthetic",
+        bbox,
+        lats,
+        lons,
+        values,
+        source=f"synthetic:{reason}",
+        provider="synthetic",
+        kind="synthetic",
+        vmin=WAVE_VMIN,
+        vmax=WAVE_VMAX,
+        extra={"unit": "s", "label": "波周期", "label_en": "peak wave period"},
+    )
+
+
+async def _remember_wave_field(wave_ns: np.ndarray, bbox: dict[str, float], source: str) -> dict[str, Any] | None:
+    ny, nx = wave_ns.shape
+    payload = wave_grid_to_scalar(wave_ns, bbox, source)
+    if int(payload.get("filled") or 0) < 8:
+        return None
+    await cache_remember(wave_cache_key(nx, ny), payload, settings.current_cache_ttl_seconds)
+    return payload
+
+
 async def _fetch_current_patch(
     marine_model: str,
     bbox: dict[str, float],
     nx: int,
     ny: int,
-) -> tuple[np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, int, np.ndarray]:
     lats, lons = _grid_points(bbox, nx, ny)
     points = [(lat, lon) for lat in reversed(lats) for lon in lons]
     u = np.zeros((ny, nx), dtype=float)
     v = np.zeros((ny, nx), dtype=float)
+    wave = np.full((ny, nx), np.nan, dtype=float)
     client = await http()
     marine = settings.open_meteo_marine_base.rstrip("/")
     ocean_idx = [(i, lat, lon) for i, (lat, lon) in enumerate(points) if not is_land(lon, lat)]
@@ -620,7 +1117,7 @@ async def _fetch_current_patch(
         params = {
             "latitude": lat_s,
             "longitude": lon_s,
-            "hourly": "ocean_current_velocity,ocean_current_direction",
+            "hourly": "ocean_current_velocity,ocean_current_direction,wave_peak_period,wave_period",
             "models": marine_model,
             "forecast_days": "1",
             "timezone": "UTC",
@@ -635,32 +1132,29 @@ async def _fetch_current_patch(
     for (idx, req_lat, req_lon), payload in zip(ocean_idx, payloads, strict=False):
         if not payload:
             continue
-        act_lat = payload.get("latitude")
-        act_lon = payload.get("longitude")
-        if act_lat is not None and act_lon is not None:
-            dlat = float(act_lat) - req_lat
-            dlon = ((float(act_lon) - req_lon + 180.0) % 360.0) - 180.0
-            dist = math.hypot(dlat, dlon * math.cos(math.radians(req_lat)))
-            if dist > 1.35:
-                continue
+        if not _marine_cell_ok(payload, req_lat, req_lon):
+            continue
         hourly = payload.get("hourly") or {}
         units = payload.get("hourly_units") or {}
         spd_key = _hourly_key("ocean_current_velocity", marine_model, payload)
         dir_key = _hourly_key("ocean_current_direction", marine_model, payload)
         spd = (hourly.get(spd_key) or [None])[0]
         cdir = (hourly.get(dir_key) or [None])[0]
+        row = idx // nx
+        col = idx % nx
+        period = _wave_period_value(payload, marine_model)
+        if period is not None:
+            wave[row, col] = period
         if spd is None or cdir is None:
             continue
         scale = _speed_unit_scale(str(units.get(spd_key) or "m/s"))
         speed = float(spd) * scale
         rad = math.radians(float(cdir))
-        row = idx // nx
-        col = idx % nx
         u[row, col] = speed * math.sin(rad)
         v[row, col] = speed * math.cos(rad)
         filled += 1
     _fill_ocean_gaps(u, v, bbox)
-    return u, v, filled
+    return u, v, filled, wave
 
 
 async def fetch_om_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
@@ -675,7 +1169,7 @@ async def fetch_om_current_grid(model: str = "best_match", nx: int | None = None
         hit["cached"] = True
         return hit
 
-    u, v, filled = await _fetch_current_patch(marine_model, bbox, nx, ny)
+    u, v, filled, wave = await _fetch_current_patch(marine_model, bbox, nx, ny)
     if filled < 8:
         stale = await cache_get_prefer(cache_key)
         if stale:
@@ -683,11 +1177,12 @@ async def fetch_om_current_grid(model: str = "best_match", nx: int | None = None
             return stale
         return synthetic_currents(nx, ny, bbox, reason="open-meteo-marine-sparse")
 
+    await _remember_wave_field(wave, bbox, f"open-meteo-marine:{marine_model}:waves")
     out = apply_ocean_mask(
         _vector_payload(nx, ny, bbox, u, v, f"open-meteo-marine:{marine_model}", filled, kind="currents")
     )
     try:
-        nest_u, nest_v, nest_filled = await _fetch_current_patch(
+        nest_u, nest_v, nest_filled, _nest_wave = await _fetch_current_patch(
             marine_model,
             CHINA_SEAS_BBOX,
             settings.current_nest_nx,
@@ -709,6 +1204,83 @@ async def fetch_om_current_grid(model: str = "best_match", nx: int | None = None
             out["nest"] = nest
     except Exception:
         pass
+    await cache_remember(cache_key, out, settings.current_cache_ttl_seconds)
+    return out
+
+
+async def fetch_wave_field(nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
+    """Peak wave period underlay. Prefer a piggybacked OM-marine cache; else one coarse fetch."""
+    bbox = dict(GLOBE_BBOX)
+    want = [
+        (int(settings.current_nx), int(settings.current_ny)),
+        (int(nx or settings.wave_nx), int(ny or settings.wave_ny)),
+    ]
+    seen: set[tuple[int, int]] = set()
+    for pair in want:
+        if pair in seen:
+            continue
+        seen.add(pair)
+        hit = await cache_get_prefer(wave_cache_key(*pair))
+        if hit and int(hit.get("filled") or 0) >= 8:
+            hit["cached"] = True
+            return hit
+
+    nx = int(nx or settings.wave_nx)
+    ny = int(ny or settings.wave_ny)
+    cache_key = wave_cache_key(nx, ny)
+    lats, lons = _grid_points(bbox, nx, ny)
+    points = [(lat, lon) for lat in reversed(lats) for lon in lons]
+    wave = np.full((ny, nx), np.nan, dtype=float)
+    client = await http()
+    marine = settings.open_meteo_marine_base.rstrip("/")
+    marine_model = "best_match"
+    ocean_idx = [(i, lat, lon) for i, (lat, lon) in enumerate(points) if not is_land(lon, lat)]
+    ocean_pts = [(lat, lon) for _, lat, lon in ocean_idx]
+
+    async def batch(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
+        lat_s = ",".join(f"{p[0]:.2f}" for p in chunk)
+        lon_s = ",".join(f"{p[1]:.2f}" for p in chunk)
+        params = {
+            "latitude": lat_s,
+            "longitude": lon_s,
+            "hourly": "wave_peak_period,wave_period",
+            "models": marine_model,
+            "forecast_days": "1",
+            "timezone": "UTC",
+            "cell_selection": "sea",
+        }
+        data = await _om_json(client, f"{marine}/v1/marine", params)
+        return data if isinstance(data, list) else [data]
+
+    payloads = await _gather_batches(ocean_pts, batch)
+    filled = 0
+    init_time: str | None = None
+    valid_time: str | None = None
+    for (idx, req_lat, req_lon), payload in zip(ocean_idx, payloads, strict=False):
+        if not payload or not _marine_cell_ok(payload, req_lat, req_lon):
+            continue
+        hourly = payload.get("hourly") or {}
+        times = hourly.get("time") or []
+        if times and valid_time is None:
+            init_time, valid_time = field_clock(times, 0)
+        period = _wave_period_value(payload, marine_model)
+        if period is None:
+            continue
+        row = idx // nx
+        col = idx % nx
+        wave[row, col] = period
+        filled += 1
+
+    if filled < 8:
+        stale = await cache_get_prefer(cache_key)
+        if stale:
+            stale["cached"] = True
+            return stale
+        return synthetic_wave_field(nx, ny, bbox, reason="open-meteo-marine-sparse")
+
+    out = wave_grid_to_scalar(
+        wave, bbox, f"open-meteo-marine:{marine_model}:waves", init_time=init_time, valid_time=valid_time
+    )
     await cache_remember(cache_key, out, settings.current_cache_ttl_seconds)
     return out
 
@@ -775,9 +1347,25 @@ def synthetic_wind(nx: int, ny: int, bbox: dict[str, float], reason: str = "fall
     return _vector_payload(nx, ny, bbox, u, v, f"synthetic:{reason}", nx * ny, kind="wind")
 
 
+FORECAST_PREVIEW_MODELS = ("gfs_seamless", "ecmwf_ifs025", "ecmwf_aifs025_single")
+
+
 async def prewarm_hot_paths() -> dict[str, Any]:
-    """Serialized warm of catalog-adjacent OM payloads. Safe to call on idle start."""
+    """Serialized warm of catalog-adjacent OM payloads. Safe to call on idle start.
+
+    Order: China 20×15 for GFS + IFS + AIFS (unblocks 预报页 cache keys), then
+    currents, globe 16×10 scalars, wind, waves. One OM call at a time; 429
+    falls back to last-good instead of retrying for minutes.
+    """
     summary: dict[str, Any] = {"ok": [], "errors": {}}
+    nx, ny = int(settings.field_nx), int(settings.field_ny)
+    for mid in FORECAST_PREVIEW_MODELS:
+        try:
+            await fetch_china_fields(mid)
+            summary["ok"].append(f"china-fields:{nx}x{ny}:{mid}:temperature_2m,surface_pressure,precipitation")
+        except Exception as exc:
+            summary["errors"][f"china-fields-{mid}"] = str(exc)
+            log.warning("prewarm china %sx%s %s: %s", nx, ny, mid, exc)
     try:
         await fetch_current_grid("best_match")
         summary["ok"].append(f"currents:{settings.current_nx}x{settings.current_ny}")
@@ -785,24 +1373,25 @@ async def prewarm_hot_paths() -> dict[str, Any]:
         summary["errors"]["currents"] = str(exc)
         log.warning("prewarm currents: %s", exc)
     try:
+        await fetch_globe_fields("gfs_seamless")
+        summary["ok"].append(
+            f"globe-fields:{settings.globe_field_nx}x{settings.globe_field_ny}:temperature_2m,surface_pressure,precipitation"
+        )
+    except Exception as exc:
+        summary["errors"]["globe-fields"] = str(exc)
+        log.warning("prewarm globe-fields: %s", exc)
+    try:
         await fetch_wind_grid("gfs_seamless", nx=settings.wind_nx, ny=settings.wind_ny)
         summary["ok"].append(f"wind:{settings.wind_nx}x{settings.wind_ny}")
     except Exception as exc:
         summary["errors"]["wind"] = str(exc)
         log.warning("prewarm wind: %s", exc)
     try:
-        await fetch_field(
-            "gfs_seamless",
-            "temperature_2m",
-            CHINA_BBOX,
-            nx=settings.field_nx,
-            ny=settings.field_ny,
-            step=0,
-        )
-        summary["ok"].append(f"field:{settings.field_nx}x{settings.field_ny}")
-    except Exception as exc:
-        summary["errors"]["field"] = str(exc)
-        log.warning("prewarm field: %s", exc)
+        await fetch_wave_field()
+        summary["ok"].append(f"waves:{settings.wave_nx}x{settings.wave_ny}")
+    except Exception as exe:
+        summary["errors"]["waves"] = str(exe)
+        log.warning("prewarm waves: %s", exe)
     log.info("open-meteo prewarm %s", summary)
     return summary
 

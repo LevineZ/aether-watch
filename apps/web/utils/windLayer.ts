@@ -460,7 +460,7 @@ export class WindParticleLayer implements CustomLayerInterface {
         const oy = this.histY[o + other]
         const t = (k - start + 1) / (segs + 1)
         // Soft faded tail: many overlapping flakes, not a hard linear stroke.
-        const alpha = current ? t * t * t * 0.38 + t * t * 0.16 : Math.pow(t, 0.72)
+        const alpha = current ? t * t * t * 0.44 + t * t * 0.2 : Math.pow(t, 0.72)
         const linked = k > start && segOk(this.histX[o + k - 1], this.histY[o + k - 1], x, y)
         if (!linked) {
           if (k === TRAIL - 1 || !segOk(x, y, ox, oy)) {
@@ -548,10 +548,10 @@ void main() {
   float t = clamp(v_speed / max(u_vmax, 0.05), 0.0, 1.0);
   vec3 col;
   if (u_kind > 0.5) {
-    vec3 c1 = vec3(0.10, 0.52, 0.70);
-    vec3 c2 = vec3(0.20, 0.82, 0.88);
-    vec3 c3 = vec3(0.55, 0.96, 0.92);
-    vec3 c4 = vec3(0.82, 0.99, 0.96);
+    vec3 c1 = vec3(0.78, 0.90, 0.96);
+    vec3 c2 = vec3(0.90, 0.97, 0.98);
+    vec3 c3 = vec3(0.97, 0.99, 0.94);
+    vec3 c4 = vec3(1.00, 0.98, 0.88);
     col = t < 0.4 ? mix(c1, c2, t / 0.4)
         : t < 0.75 ? mix(c2, c3, (t - 0.4) / 0.35)
         : mix(c3, c4, (t - 0.75) / 0.25);
@@ -565,7 +565,7 @@ void main() {
         : mix(c3, c4, (t - 0.66) / 0.34);
   }
   float edge = 1.0 - smoothstep(0.22, 1.0, abs(v_side));
-  float sheet = u_kind > 0.5 ? (0.22 + 0.34 * t) : (0.58 + 0.42 * t);
+  float sheet = u_kind > 0.5 ? (0.30 + 0.40 * t) : (0.58 + 0.42 * t);
   float a = v_alpha * edge * sheet;
   fragColor = vec4(col * a, a);
 }`

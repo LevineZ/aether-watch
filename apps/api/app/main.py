@@ -22,6 +22,7 @@ from app.catalog import (
     ELEMENT_BY_ID,
     ELEMENTS,
     GLOBE_ELEMENTS,
+    GLOBE_SCALAR_VARS,
     PREVIEW_BY_ID,
     PREVIEW_MODELS,
 )
@@ -35,7 +36,7 @@ from app.workers import NcIngestActor, broker
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("aetherwatch")
 
-CATALOG_CACHE_KEY = "catalog:v2"
+CATALOG_CACHE_KEY = "catalog:v3"
 
 
 async def _prewarm_idle() -> None:
@@ -207,6 +208,10 @@ async def catalog(session: AsyncSession = Depends(get_session)) -> dict[str, Any
             "current_ny": settings.current_ny,
             "wind_nx": settings.wind_nx,
             "wind_ny": settings.wind_ny,
+            "globe_field_nx": settings.globe_field_nx,
+            "globe_field_ny": settings.globe_field_ny,
+            "wave_nx": settings.wave_nx,
+            "wave_ny": settings.wave_ny,
         },
     }
     await openmeteo.cache_set_live_and_last(CATALOG_CACHE_KEY, out, settings.catalog_cache_ttl_seconds)
@@ -291,6 +296,40 @@ async def runs(hours: int = Query(120, ge=6, le=240)) -> dict[str, Any]:
         t = now + timedelta(hours=h)
         steps.append({"lead": h, "time": t.isoformat(), "label": f"+{h}h"})
     return {"init": now.isoformat(), "steps": steps}
+
+
+@app.get("/api/waves")
+async def waves() -> dict[str, Any]:
+    try:
+        return await openmeteo.fetch_wave_field()
+    except Exception as exc:
+        log.warning("waves live fetch failed: %s", exc)
+        return openmeteo.synthetic_wave_field(
+            settings.wave_nx,
+            settings.wave_ny,
+            reason="waves-endpoint",
+        )
+
+
+@app.get("/api/globe-fields")
+async def globe_fields(model: str = Query("gfs_seamless")) -> dict[str, Any]:
+    try:
+        return await openmeteo.fetch_globe_fields(model)
+    except Exception as exc:
+        log.warning("globe-fields live fetch failed: %s", exc)
+        nx, ny = settings.globe_field_nx, settings.globe_field_ny
+        return {
+            "model": "synthetic",
+            "model_id": "synthetic",
+            "fields": {
+                var: openmeteo.synthetic_globe_field(var, nx, ny, reason="globe-fields-endpoint")
+                for var in GLOBE_SCALAR_VARS
+            },
+            "source": "synthetic",
+            "fallback": True,
+            "nx": nx,
+            "ny": ny,
+        }
 
 
 @app.get("/api/wind")
@@ -381,6 +420,16 @@ async def china_prc() -> dict[str, Any]:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     raise HTTPException(404, "china-prc geojson missing")
+
+
+@app.get("/api/geo/ne-110m-land.json")
+async def ne_110m_land() -> dict[str, Any]:
+    from pathlib import Path
+
+    path = Path(settings.geo_dir) / "ne-110m-land.geojson"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    raise HTTPException(404, "ne-110m-land geojson missing")
 
 
 @app.get("/api/geo/china-bounds.json")
