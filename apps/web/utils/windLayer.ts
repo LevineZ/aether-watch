@@ -1,4 +1,11 @@
 import type { CustomLayerInterface, Map as MlMap } from "maplibre-gl"
+import {
+  CURRENT_STEP,
+  CURRENT_STROKE_SEGS,
+  SHEET_EDGE_K,
+  sheetAlpha,
+  sheetFade,
+} from "./currentSheet"
 import { currentSegmentOk, frontCosc, MIN_COSC_CURRENT, MIN_COSC_WIND } from "./flowSegment"
 import { isOcean } from "./landmask"
 import {
@@ -31,21 +38,15 @@ type RenderArgs = {
 
 /**
  * History points per particle.
- * Currents need a longer faded trail so slow advection still reads as nullschool streamlines.
+ * Wind still redraws a CPU trail each frame. Currents only emit CURRENT_STROKE_SEGS;
+ * the silk body lives in the destination-in fade buffer.
  */
-const TRAIL = 44
+const TRAIL = 36
 /** pos.xy, other.xy, side, speed, alpha, trailT */
 const STRIDE = 8
 const MAX_PARTICLES = 22000
 /** Two verts per history point + a few degenerates to join strips. */
 const VERTS_PER_PARTICLE = TRAIL * 2 + 16
-/**
- * Degrees per 16.67ms at 1 m/s.
- * Stay at or below 0.25 — faster reads as racing lines, not nullschool sheets.
- * cambecc/earth currents use velocityScale 1/4400 vs wind 1/60000, plus a
- * destination-in 0.97 fade. We keep a calm step and build density with overlap.
- */
-const CURRENT_STEP = 0.22
 const WIND_STEP = 0.03
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
@@ -99,11 +100,93 @@ type ShaderBundle = {
   uPixel: WebGLUniformLocation | null
 }
 
+type ScreenBundle = {
+  fade: WebGLProgram
+  blit: WebGLProgram
+  uFade: WebGLUniformLocation | null
+  uBlit: WebGLUniformLocation | null
+  aFade: number
+  aBlit: number
+}
+
+type GlSnap = {
+  fbo: WebGLFramebuffer | null
+  vao: WebGLVertexArrayObject | null
+  arrayBuf: WebGLBuffer | null
+  program: WebGLProgram | null
+  activeTex: number
+  tex0: WebGLTexture | null
+  viewport: Int32Array
+  blend: boolean
+  blendSrc: number
+  blendDst: number
+  blendSrcA: number
+  blendDstA: number
+  blendColor: Float32Array
+  depth: boolean
+  stencil: boolean
+  scissor: boolean
+  cull: boolean
+  depthMask: boolean
+  colorMask: boolean[]
+}
+
+function snapGl(gl: WebGL2RenderingContext): GlSnap {
+  const activeTex = gl.getParameter(gl.ACTIVE_TEXTURE)
+  gl.activeTexture(gl.TEXTURE0)
+  const tex0 = gl.getParameter(gl.TEXTURE_BINDING_2D)
+  gl.activeTexture(activeTex)
+  return {
+    fbo: gl.getParameter(gl.FRAMEBUFFER_BINDING),
+    vao: gl.getParameter(gl.VERTEX_ARRAY_BINDING),
+    arrayBuf: gl.getParameter(gl.ARRAY_BUFFER_BINDING),
+    program: gl.getParameter(gl.CURRENT_PROGRAM),
+    activeTex,
+    tex0,
+    viewport: gl.getParameter(gl.VIEWPORT),
+    blend: gl.isEnabled(gl.BLEND),
+    blendSrc: gl.getParameter(gl.BLEND_SRC_RGB),
+    blendDst: gl.getParameter(gl.BLEND_DST_RGB),
+    blendSrcA: gl.getParameter(gl.BLEND_SRC_ALPHA),
+    blendDstA: gl.getParameter(gl.BLEND_DST_ALPHA),
+    blendColor: gl.getParameter(gl.BLEND_COLOR),
+    depth: gl.isEnabled(gl.DEPTH_TEST),
+    stencil: gl.isEnabled(gl.STENCIL_TEST),
+    scissor: gl.isEnabled(gl.SCISSOR_TEST),
+    cull: gl.isEnabled(gl.CULL_FACE),
+    depthMask: gl.getParameter(gl.DEPTH_WRITEMASK),
+    colorMask: gl.getParameter(gl.COLOR_WRITEMASK),
+  }
+}
+
+function restoreGl(gl: WebGL2RenderingContext, s: GlSnap) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, s.fbo)
+  gl.viewport(s.viewport[0], s.viewport[1], s.viewport[2], s.viewport[3])
+  gl.bindVertexArray(s.vao)
+  gl.bindBuffer(gl.ARRAY_BUFFER, s.arrayBuf)
+  gl.useProgram(s.program)
+  gl.activeTexture(gl.TEXTURE0)
+  gl.bindTexture(gl.TEXTURE_2D, s.tex0)
+  gl.activeTexture(s.activeTex)
+  s.blend ? gl.enable(gl.BLEND) : gl.disable(gl.BLEND)
+  gl.blendFuncSeparate(s.blendSrc, s.blendDst, s.blendSrcA, s.blendDstA)
+  gl.blendColor(s.blendColor[0], s.blendColor[1], s.blendColor[2], s.blendColor[3])
+  s.depth ? gl.enable(gl.DEPTH_TEST) : gl.disable(gl.DEPTH_TEST)
+  s.stencil ? gl.enable(gl.STENCIL_TEST) : gl.disable(gl.STENCIL_TEST)
+  s.scissor ? gl.enable(gl.SCISSOR_TEST) : gl.disable(gl.SCISSOR_TEST)
+  s.cull ? gl.enable(gl.CULL_FACE) : gl.disable(gl.CULL_FACE)
+  gl.depthMask(s.depthMask)
+  gl.colorMask(s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3])
+}
+
 /**
  * MapLibre custom layer: CPU advection + GPU triangle-strip ribbons.
  * WebGL lineWidth is 1px on most GPUs, so GL_LINES read as dots at globe scale.
- * Currents: thin faded sheets (cambecc/earth 1px strokes + fade), not fat 观潮 tubes.
- * Wind stays a slightly thicker, faster yellow-green ribbon so the two modes stay distinct.
+ *
+ * Currents: short gaussian flakes drawn into a persistent FBO that is faded
+ * each tick with a destination-in multiply (cambecc/earth 0.97 fill). Overlap
+ * reads as silk sheets, not a spaghetti of 40-point ribbons. Wind stays a
+ * thicker, faster yellow-green ribbon so the two modes stay distinct.
  * Clip-space extrusion MUST skip long NDC / wrap segments or they become horizontal slabs.
  */
 export class WindParticleLayer implements CustomLayerInterface {
@@ -120,6 +203,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   private buffer: WebGLBuffer | null = null
   private vao: WebGLVertexArrayObject | null = null
   private shaders = new Map<string, ShaderBundle>()
+  private screen: ScreenBundle | null = null
   private grid: WindGrid | null = null
 
   private count = 0
@@ -133,6 +217,7 @@ export class WindParticleLayer implements CustomLayerInterface {
 
   private raf = 0
   private lastT = 0
+  private frameDt = 16.67
   private visible = true
   private pageHidden = false
   private reduced = false
@@ -140,10 +225,20 @@ export class WindParticleLayer implements CustomLayerInterface {
   private observer: IntersectionObserver | null = null
   private gen = 0
 
+  private trailFbo: WebGLFramebuffer | null = null
+  private trailTex: WebGLTexture | null = null
+  private trailW = 0
+  private trailH = 0
+  private quadVao: WebGLVertexArrayObject | null = null
+  private quadBuf: WebGLBuffer | null = null
+  private mustClearTrail = true
+  private trailStamp = -1
+
   setField(wind: Wind | null, kind: FlowKind = this.kind) {
     this.kind = kind
     this.grid = wind ? packWind(wind) : null
     this.gen++
+    this.mustClearTrail = true
     if (this.count) this.seed(this.count)
   }
 
@@ -169,6 +264,8 @@ export class WindParticleLayer implements CustomLayerInterface {
     this.vao = gl.createVertexArray()
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer)
     gl.bufferData(gl.ARRAY_BUFFER, this.verts.byteLength, gl.DYNAMIC_DRAW)
+    this.initQuad(gl)
+    this.mustClearTrail = true
 
     this.reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
     this.pageHidden = document.hidden
@@ -206,67 +303,53 @@ export class WindParticleLayer implements CustomLayerInterface {
     this.observer = null
     if (this.buffer) gl.deleteBuffer(this.buffer)
     if (this.vao) gl.deleteVertexArray(this.vao)
+    if (this.quadBuf) gl.deleteBuffer(this.quadBuf)
+    if (this.quadVao) gl.deleteVertexArray(this.quadVao)
+    this.destroyTrail(gl)
+    if (this.screen) {
+      gl.deleteProgram(this.screen.fade)
+      gl.deleteProgram(this.screen.blit)
+    }
     for (const s of this.shaders.values()) gl.deleteProgram(s.program)
     this.shaders.clear()
+    this.screen = null
     this.buffer = null
     this.vao = null
+    this.quadBuf = null
+    this.quadVao = null
     this.gl = null
     this.map = null
   }
 
+  /** Update the screen-space fade buffer before MapLibre composites this layer. */
+  prerender(gl: WebGL2RenderingContext, args: RenderArgs) {
+    if (this.kind !== "current" || !this.visible || !this.playing || !this.grid) return
+    this.paintTrail(gl, args)
+  }
+
   render(gl: WebGL2RenderingContext, args: RenderArgs) {
     if (!this.visible || !this.playing || !this.grid || this.usedVerts < 4) return
-    const bundle = this.getShader(gl, args)
-    if (!bundle) return
-
-    const proj = args.defaultProjectionData
-    gl.useProgram(bundle.program)
-    gl.uniformMatrix4fv(bundle.uMatrix, false, proj.mainMatrix as Float32Array)
-    gl.uniformMatrix4fv(bundle.uFallback, false, proj.fallbackMatrix as Float32Array)
-    gl.uniform4f(bundle.uTile, ...proj.tileMercatorCoords)
-    gl.uniform4f(bundle.uClip, ...proj.clippingPlane)
-    gl.uniform1f(bundle.uTrans, proj.projectionTransition)
-    gl.uniform1f(bundle.uKind, this.kind === "current" ? 1 : 0)
-    gl.uniform1f(bundle.uVmax, this.kind === "current" ? FLOW_VMAX.current : FLOW_VMAX.wind)
-    gl.uniform1f(bundle.uWidth, this.ribbonWidth())
-    gl.uniform2f(bundle.uPixel, 2 / Math.max(1, gl.drawingBufferWidth), 2 / Math.max(1, gl.drawingBufferHeight))
-
-    if (this.vao) gl.bindVertexArray(this.vao)
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer)
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.verts.subarray(0, this.usedVerts * STRIDE))
-
-    gl.enableVertexAttribArray(bundle.aPos)
-    gl.enableVertexAttribArray(bundle.aOther)
-    gl.enableVertexAttribArray(bundle.aSide)
-    gl.enableVertexAttribArray(bundle.aSpeed)
-    gl.enableVertexAttribArray(bundle.aAlpha)
-    if (bundle.aTrail >= 0) gl.enableVertexAttribArray(bundle.aTrail)
-    const stride = STRIDE * 4
-    gl.vertexAttribPointer(bundle.aPos, 2, gl.FLOAT, false, stride, 0)
-    gl.vertexAttribPointer(bundle.aOther, 2, gl.FLOAT, false, stride, 8)
-    gl.vertexAttribPointer(bundle.aSide, 1, gl.FLOAT, false, stride, 16)
-    gl.vertexAttribPointer(bundle.aSpeed, 1, gl.FLOAT, false, stride, 20)
-    gl.vertexAttribPointer(bundle.aAlpha, 1, gl.FLOAT, false, stride, 24)
-    if (bundle.aTrail >= 0) gl.vertexAttribPointer(bundle.aTrail, 1, gl.FLOAT, false, stride, 28)
-
-    gl.enable(gl.BLEND)
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
-    gl.disable(gl.DEPTH_TEST)
-    gl.disable(gl.CULL_FACE)
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, this.usedVerts)
-    if (this.vao) gl.bindVertexArray(null)
+    if (this.kind === "current") {
+      this.paintTrail(gl, args)
+      if (this.trailTex) {
+        this.blitTrail(gl)
+        return
+      }
+    }
+    this.drawStrips(gl, args, false)
   }
 
   private _onVis: (() => void) | null = null
   private _onMoveStart = () => {
     this.interacting = true
+    this.mustClearTrail = true
   }
   private _onMoveEnd = () => {
     this.interacting = false
   }
 
   private baseCount(width: number, dpr: number) {
-    if (this.reduced) return this.kind === "current" ? 3600 : 2200
+    if (this.reduced) return this.kind === "current" ? 4200 : 2200
     return Math.min(MAX_PARTICLES, targetParticleCount(width, dpr, this.kind))
   }
 
@@ -285,7 +368,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     const z = this.map?.getZoom() ?? 1.7
     if (this.kind === "current") {
       const zoomMul = z < 2.15 ? 1.12 : z < 3.4 ? 1.0 : 0.9
-      return 1.55 * zoomMul
+      return 1.95 * zoomMul
     }
     const zoomMul = z < 2.15 ? 1.22 : z < 3.4 ? 1.0 : 0.85
     return 2.2 * zoomMul
@@ -295,6 +378,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     this.count = Math.min(MAX_PARTICLES, n)
     for (let i = 0; i < this.count; i++) this.spawn(i, true)
     this.usedVerts = 0
+    this.mustClearTrail = true
   }
 
   private spawn(i: number, randomAge = false) {
@@ -356,6 +440,7 @@ export class WindParticleLayer implements CustomLayerInterface {
       if (!hidden) {
         const dt = Math.min(48, now - this.lastT)
         this.lastT = now
+        this.frameDt = dt
         if (dt > 26) this.dropped = Math.min(12, this.dropped + 1)
         else if (dt < 15) this.dropped = Math.max(0, this.dropped - 1)
         if (this.playing && this.grid) this.advect(dt)
@@ -384,8 +469,15 @@ export class WindParticleLayer implements CustomLayerInterface {
     let w = 0
     const verts = this.verts
     const minCos = current ? MIN_COSC_CURRENT : MIN_COSC_WIND
-    const segs = interacting ? 10 : current ? TRAIL - 1 : Math.min(TRAIL - 1, 22)
+    const segs = interacting
+      ? current
+        ? Math.min(2, CURRENT_STROKE_SEGS)
+        : 10
+      : current
+        ? CURRENT_STROKE_SEGS
+        : Math.min(TRAIL - 1, 22)
     const start = TRAIL - 1 - segs
+    const vmax = current ? FLOW_VMAX.current : FLOW_VMAX.wind
 
     const cap = this.verts.length / STRIDE - 8
     const emit = (x: number, y: number, ox: number, oy: number, side: number, spd: number, alpha: number, t: number) => {
@@ -459,8 +551,7 @@ export class WindParticleLayer implements CustomLayerInterface {
         const ox = this.histX[o + other]
         const oy = this.histY[o + other]
         const t = (k - start + 1) / (segs + 1)
-        // Soft faded tail: many overlapping flakes, not a hard linear stroke.
-        const alpha = current ? t * t * t * 0.38 + t * t * 0.16 : Math.pow(t, 0.72)
+        const alpha = current ? sheetAlpha(t, spd / vmax) : Math.pow(t, 0.72)
         const linked = k > start && segOk(this.histX[o + k - 1], this.histY[o + k - 1], x, y)
         if (!linked) {
           if (k === TRAIL - 1 || !segOk(x, y, ox, oy)) {
@@ -480,6 +571,206 @@ export class WindParticleLayer implements CustomLayerInterface {
       }
     }
     this.usedVerts = w
+  }
+
+  private initQuad(gl: WebGL2RenderingContext) {
+    this.quadVao = gl.createVertexArray()
+    this.quadBuf = gl.createBuffer()
+    gl.bindVertexArray(this.quadVao)
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf)
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW)
+    gl.bindVertexArray(null)
+  }
+
+  private destroyTrail(gl: WebGL2RenderingContext) {
+    if (this.trailFbo) gl.deleteFramebuffer(this.trailFbo)
+    if (this.trailTex) gl.deleteTexture(this.trailTex)
+    this.trailFbo = null
+    this.trailTex = null
+    this.trailW = 0
+    this.trailH = 0
+  }
+
+  private ensureTrail(gl: WebGL2RenderingContext) {
+    // Slightly undersize + linear upsample so short strokes blur into silk.
+    const w = Math.max(1, Math.round(gl.drawingBufferWidth * 0.62))
+    const h = Math.max(1, Math.round(gl.drawingBufferHeight * 0.62))
+    if (this.trailTex && this.trailFbo && this.trailW === w && this.trailH === h) return true
+    this.destroyTrail(gl)
+    const tex = gl.createTexture()
+    const fbo = gl.createFramebuffer()
+    if (!tex || !fbo) return false
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    if (!ok) {
+      gl.deleteTexture(tex)
+      gl.deleteFramebuffer(fbo)
+      return false
+    }
+    this.trailTex = tex
+    this.trailFbo = fbo
+    this.trailW = w
+    this.trailH = h
+    this.mustClearTrail = true
+    return true
+  }
+
+  private ensureScreen(gl: WebGL2RenderingContext): ScreenBundle | null {
+    if (this.screen) return this.screen
+    const vs = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`
+    const fadeFs = `#version 300 es
+precision highp float;
+uniform float u_fade;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(u_fade);
+}`
+    const blitFs = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  fragColor = texture(u_tex, v_uv);
+}`
+    const fade = link(gl, vs, fadeFs)
+    const blit = link(gl, vs, blitFs)
+    if (!fade || !blit) return null
+    this.screen = {
+      fade,
+      blit,
+      uFade: gl.getUniformLocation(fade, "u_fade"),
+      uBlit: gl.getUniformLocation(blit, "u_tex"),
+      aFade: gl.getAttribLocation(fade, "a_pos"),
+      aBlit: gl.getAttribLocation(blit, "a_pos"),
+    }
+    return this.screen
+  }
+
+  private bindQuad(gl: WebGL2RenderingContext, loc: number) {
+    gl.bindVertexArray(this.quadVao)
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf)
+    gl.enableVertexAttribArray(loc)
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
+  }
+
+  /**
+   * destination-in equivalent: multiply the trail FBO by fade, then add short
+   * current flakes. Skips extra MapLibre passes in the same animation tick.
+   */
+  private paintTrail(gl: WebGL2RenderingContext, args: RenderArgs) {
+    if (this.trailStamp === this.lastT && !this.mustClearTrail) return
+    if (!this.ensureTrail(gl) || !this.trailFbo || !this.trailTex) return
+    const screen = this.ensureScreen(gl)
+    if (!screen) return
+    const snap = snapGl(gl)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.trailFbo)
+    gl.viewport(0, 0, this.trailW, this.trailH)
+    gl.disable(gl.DEPTH_TEST)
+    gl.disable(gl.STENCIL_TEST)
+    gl.disable(gl.SCISSOR_TEST)
+    gl.disable(gl.CULL_FACE)
+    gl.depthMask(false)
+    gl.colorMask(true, true, true, true)
+
+    if (this.mustClearTrail) {
+      gl.clearColor(0, 0, 0, 0)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      this.mustClearTrail = false
+    } else {
+      const fade = sheetFade(this.frameDt, this.interacting)
+      gl.enable(gl.BLEND)
+      gl.blendColor(fade, fade, fade, fade)
+      gl.blendFunc(gl.ZERO, gl.CONSTANT_COLOR)
+      gl.useProgram(screen.fade)
+      gl.uniform1f(screen.uFade, fade)
+      this.bindQuad(gl, screen.aFade)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+    }
+
+    if (this.usedVerts >= 4) {
+      gl.enable(gl.BLEND)
+      // Premultiplied over (not additive): jets saturate to silk, not white lines.
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+      this.drawStrips(gl, args, false, false)
+    }
+    restoreGl(gl, snap)
+    this.trailStamp = this.lastT
+  }
+
+  private blitTrail(gl: WebGL2RenderingContext) {
+    const screen = this.ensureScreen(gl)
+    if (!screen || !this.trailTex) return
+    const snap = snapGl(gl)
+    gl.disable(gl.DEPTH_TEST)
+    gl.disable(gl.CULL_FACE)
+    gl.depthMask(false)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
+    gl.useProgram(screen.blit)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, this.trailTex)
+    gl.uniform1i(screen.uBlit, 0)
+    this.bindQuad(gl, screen.aBlit)
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+    restoreGl(gl, snap)
+  }
+
+  private drawStrips(gl: WebGL2RenderingContext, args: RenderArgs, additive: boolean, restore = true) {
+    const bundle = this.getShader(gl, args)
+    if (!bundle) return
+    const snap = restore ? snapGl(gl) : null
+    const proj = args.defaultProjectionData
+    gl.useProgram(bundle.program)
+    gl.uniformMatrix4fv(bundle.uMatrix, false, proj.mainMatrix as Float32Array)
+    gl.uniformMatrix4fv(bundle.uFallback, false, proj.fallbackMatrix as Float32Array)
+    gl.uniform4f(bundle.uTile, ...proj.tileMercatorCoords)
+    gl.uniform4f(bundle.uClip, ...proj.clippingPlane)
+    gl.uniform1f(bundle.uTrans, proj.projectionTransition)
+    gl.uniform1f(bundle.uKind, this.kind === "current" ? 1 : 0)
+    gl.uniform1f(bundle.uVmax, this.kind === "current" ? FLOW_VMAX.current : FLOW_VMAX.wind)
+    gl.uniform1f(bundle.uWidth, this.ribbonWidth())
+    gl.uniform2f(bundle.uPixel, 2 / Math.max(1, gl.drawingBufferWidth), 2 / Math.max(1, gl.drawingBufferHeight))
+
+    if (this.vao) gl.bindVertexArray(this.vao)
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer)
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.verts.subarray(0, this.usedVerts * STRIDE))
+
+    gl.enableVertexAttribArray(bundle.aPos)
+    gl.enableVertexAttribArray(bundle.aOther)
+    gl.enableVertexAttribArray(bundle.aSide)
+    gl.enableVertexAttribArray(bundle.aSpeed)
+    gl.enableVertexAttribArray(bundle.aAlpha)
+    if (bundle.aTrail >= 0) gl.enableVertexAttribArray(bundle.aTrail)
+    const stride = STRIDE * 4
+    gl.vertexAttribPointer(bundle.aPos, 2, gl.FLOAT, false, stride, 0)
+    gl.vertexAttribPointer(bundle.aOther, 2, gl.FLOAT, false, stride, 8)
+    gl.vertexAttribPointer(bundle.aSide, 1, gl.FLOAT, false, stride, 16)
+    gl.vertexAttribPointer(bundle.aSpeed, 1, gl.FLOAT, false, stride, 20)
+    gl.vertexAttribPointer(bundle.aAlpha, 1, gl.FLOAT, false, stride, 24)
+    if (bundle.aTrail >= 0) gl.vertexAttribPointer(bundle.aTrail, 1, gl.FLOAT, false, stride, 28)
+
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.ONE, additive ? gl.ONE : gl.ONE_MINUS_SRC_ALPHA)
+    gl.disable(gl.DEPTH_TEST)
+    gl.disable(gl.CULL_FACE)
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, this.usedVerts)
+    if (this.vao) gl.bindVertexArray(null)
+    if (snap) restoreGl(gl, snap)
   }
 
   private getShader(gl: WebGL2RenderingContext, args: RenderArgs): ShaderBundle | null {
@@ -522,12 +813,9 @@ void main() {
   const float MAX_NDC = 0.08;
   if (len < 1e-7 || len > MAX_NDC || abs(ndcA.x) > 1.25 || abs(ndcA.y) > 1.25) keep = 0.0;
   vec2 n = len > 1e-7 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
-  // Currents: mid-trail flake (片状), not a constant-width tube.
-  float tt = clamp(a_trail, 0.0, 1.0);
-  // Mid-trail bulge + soft ends → overlapping flakes, not a constant-width tube.
-  float flake = u_kind > 0.5 ? mix(0.28, 1.18, pow(sin(tt * 3.14159265), 1.35)) : 1.0;
+  // No mid-trail flake bulge — that still read as a tapered line.
   float slim = 1.0 - smoothstep(0.028, MAX_NDC, len);
-  vec2 offset = keep > 0.5 ? n * a_side * u_width * u_pixel * flake * slim : vec2(0.0);
+  vec2 offset = keep > 0.5 ? n * a_side * u_width * u_pixel * slim : vec2(0.0);
   gl_Position = vec4((ndcA + offset) * a.w, a.z, a.w);
   v_speed = a_speed;
   v_alpha = a_alpha;
@@ -564,8 +852,10 @@ void main() {
         : t < 0.66 ? mix(c2, c3, (t - 0.33) / 0.33)
         : mix(c3, c4, (t - 0.66) / 0.34);
   }
-  float edge = 1.0 - smoothstep(0.22, 1.0, abs(v_side));
-  float sheet = u_kind > 0.5 ? (0.22 + 0.34 * t) : (0.58 + 0.42 * t);
+  float edge = u_kind > 0.5
+    ? exp(-v_side * v_side * ${SHEET_EDGE_K.toFixed(2)})
+    : (1.0 - smoothstep(0.55, 1.0, abs(v_side)));
+  float sheet = u_kind > 0.5 ? 1.0 : (0.58 + 0.42 * t);
   float a = v_alpha * edge * sheet;
   fragColor = vec4(col * a, a);
 }`

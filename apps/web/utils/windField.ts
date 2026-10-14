@@ -120,8 +120,8 @@ export function mercatorY(lat: number) {
 }
 
 /**
- * Sheet coverage for thin faded trails. Currents want more overlap so the field
- * reads as nullschool streamlines rather than sparse tubes; wind stays a bit sparser.
+ * Sheet coverage for short faded flakes. Currents want more overlap so the field
+ * reads as a nullschool silk mass rather than sparse tubes; wind stays a bit sparser.
  */
 export function targetParticleCount(width: number, dpr: number, kind: "wind" | "current" = "wind") {
   const bias = kind === "current" ? 1.85 : 1.05
