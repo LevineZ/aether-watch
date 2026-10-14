@@ -43,7 +43,7 @@ async def _prewarm_idle() -> None:
     """First-idle serialized Open-Meteo warm so a cold UI does not stampede."""
     await asyncio.sleep(2.0)
     try:
-        await openmeteo.prewarm_hot_paths()
+        await openmeteo.prewarm_hot_paths_resilient()
     except Exception as exc:
         log.warning("prewarm: %s", exc)
 
@@ -257,14 +257,36 @@ async def field(
         return await _nc_field(session, model[3:], step)
     if variable not in ELEMENT_BY_ID:
         raise HTTPException(400, f"unknown variable {variable}")
-    return await openmeteo.fetch_field(
-        model,
-        variable,
-        bbox,
-        nx=nx or settings.field_nx,
-        ny=ny or settings.field_ny,
-        step=step,
-    )
+    try:
+        return await openmeteo.fetch_field(
+            model,
+            variable,
+            bbox,
+            nx=nx or settings.field_nx,
+            ny=ny or settings.field_ny,
+            step=step,
+        )
+    except openmeteo.OpenMeteoRateLimit:
+        return openmeteo.unavailable_field(
+            model,
+            variable,
+            bbox,
+            nx=nx or settings.field_nx,
+            ny=ny or settings.field_ny,
+            step=step,
+            reason="open-meteo-429",
+        )
+    except Exception as exc:
+        log.warning("field live fetch failed: %s", exc)
+        return openmeteo.unavailable_field(
+            model,
+            variable,
+            bbox,
+            nx=nx or settings.field_nx,
+            ny=ny or settings.field_ny,
+            step=step,
+            reason="open-meteo-error",
+        )
 
 
 @app.get("/api/compare")
@@ -317,6 +339,11 @@ async def globe_fields(model: str = Query("gfs_seamless")) -> dict[str, Any]:
         return await openmeteo.fetch_globe_fields(model)
     except Exception as exc:
         log.warning("globe-fields live fetch failed: %s", exc)
+        bag = await openmeteo.globe_fields_from_v4(model, fill_synthetic=True, reason="open-meteo-429")
+        if bag and any(
+            openmeteo.field_is_real((bag.get("fields") or {}).get(var)) for var in GLOBE_SCALAR_VARS
+        ):
+            return bag
         nx, ny = settings.globe_field_nx, settings.globe_field_ny
         return {
             "model": "synthetic",
@@ -546,7 +573,7 @@ async def flush_forecast_cache(
     async def _later() -> None:
         await asyncio.sleep(15.0)
         try:
-            await openmeteo.prewarm_hot_paths()
+            await openmeteo.prewarm_hot_paths_resilient()
         except Exception as exc:
             log.warning("delayed prewarm after flush: %s", exc)
 

@@ -66,7 +66,7 @@ class PrewarmCoverageTest(unittest.TestCase):
         self.assertIn("surface_pressure", src)
         self.assertIn("precipitation", src)
         self.assertIn("FORECAST_PREVIEW_MODELS", src)
-        self.assertIn("for mid in FORECAST_PREVIEW_MODELS", src)
+        self.assertIn("china_models", src)
         self.assertNotIn("nx=8", src)
         self.assertNotIn("ny=6", src)
         forecast = (REPO / "apps" / "web" / "pages" / "forecast.vue").read_text(encoding="utf-8")
@@ -80,10 +80,27 @@ class PrewarmCoverageTest(unittest.TestCase):
         self.assertIn("OpenMeteoRateLimit", om)
         field = inspect.getsource(fetch_field)
         self.assertIn("last_good_on_rate_limit", field)
+        self.assertIn("unavailable_field", field)
+        self.assertIn("assemble_scalar_fields_from_v4", field)
         china = inspect.getsource(fetch_china_fields)
         self.assertIn("last_good_on_rate_limit", china)
         globe = inspect.getsource(fetch_globe_fields)
         self.assertIn("last_good_on_rate_limit", globe)
+        self.assertIn("globe_fields_from_v4", globe)
+        self.assertIn("field:v4", globe)
+
+    def test_prewarm_retries_with_backoff(self):
+        from app.openmeteo import prewarm_hot_paths, prewarm_hot_paths_resilient
+
+        src = inspect.getsource(prewarm_hot_paths)
+        self.assertIn("open_meteo_prewarm_gap_seconds", src)
+        self.assertIn("skip remaining models this pass", src)
+        resilient = inspect.getsource(prewarm_hot_paths_resilient)
+        self.assertIn("retry_wait_seconds", resilient)
+        self.assertIn("open_meteo_prewarm_retry_base", resilient)
+        main = (REPO / "apps" / "api" / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("prewarm_hot_paths_resilient", main)
+        self.assertIn("unavailable_field", main)
 
     def test_marine_current_piggybacks_wave_period(self):
         from app.openmeteo import _fetch_current_patch
@@ -117,9 +134,15 @@ class FrontGlobeStyleTest(unittest.TestCase):
         self.assertIn("pageBusy", forecast)
         self.assertIn("fieldPending", forecast)
         self.assertIn("fieldHasSignal", forecast)
+        self.assertIn("fieldErrors", forecast)
+        self.assertIn("retryField", forecast)
         self.assertIn("debounceFields", forecast)
         self.assertNotIn("COARSE_NX", forecast)
         self.assertNotIn("fetchFieldBackoff", forecast)
+        fmap = (REPO / "apps" / "web" / "components" / "FieldMap.vue").read_text(encoding="utf-8")
+        self.assertIn("map-error", fmap)
+        self.assertIn("forecast.retry", fmap)
+        self.assertIn("forecast.rateLimited", (REPO / "apps" / "web" / "utils" / "messages.ts").read_text(encoding="utf-8"))
 
     def test_globe_uses_ocean_background_and_local_land_fill(self):
         land = (REPO / "apps" / "web" / "utils" / "globeLand.ts").read_text(encoding="utf-8")

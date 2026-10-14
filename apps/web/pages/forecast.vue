@@ -74,6 +74,7 @@
             :palette="palette"
             :color="colorOf(id)"
             :loading="mapBusy(id)"
+            :error="fieldErrors[id] || ''"
             :camera="camera"
             :driver-id="cameraDriver"
             :pick="{ lat, lon }"
@@ -87,10 +88,11 @@
             @zoom-by="zoomBy"
             @reset="resetCamera"
             @reload-view="reloadAtView"
+            @retry="retryField(id)"
           />
         </ClientOnly>
       </div>
-      <p v-if="fieldError" class="error">{{ fieldError }}</p>
+      <p v-if="allMapsFailed" class="error">{{ t("forecast.rateLimited") }}</p>
     </section>
 
     <section class="panel fsec">
@@ -149,10 +151,9 @@ const lonText = ref("116.40")
 const fields = ref<Record<string, ScalarField>>({})
 let fieldGen = 0
 const fieldCache = new Map<string, ScalarField>()
-const fieldError = ref("")
 const fieldLoading = ref(false)
 const fieldPending = ref<Record<string, boolean>>({})
-const fieldFailed = ref<Record<string, boolean>>({})
+const fieldErrors = ref<Record<string, string>>({})
 const seriesLoading = ref(false)
 const seriesError = ref("")
 const chartTimes = ref<string[]>([])
@@ -186,7 +187,14 @@ const pageBusy = computed(() => {
   if (!ids.length) return false
   const anyPainted = ids.some((id) => fieldHasSignal(fields.value[id]))
   if (anyPainted) return false
-  return ids.some((id) => fieldPending.value[id] || fieldLoading.value)
+  const anyFailed = ids.some((id) => !!fieldErrors.value[id])
+  const anyPending = ids.some((id) => fieldPending.value[id])
+  if (!anyPending && (anyFailed || !fieldLoading.value)) return false
+  return anyPending || fieldLoading.value
+})
+const allMapsFailed = computed(() => {
+  const ids = mapsToShow.value
+  return ids.length > 0 && ids.every((id) => !!fieldErrors.value[id]) && !ids.some((id) => fieldHasSignal(fields.value[id]))
 })
 
 function elLabel(el?: Element | null) {
@@ -346,11 +354,25 @@ function fieldKey(id: string, bbox: GeoBbox) {
 }
 
 function mapBusy(id: string) {
-  return !!fieldPending.value[id] && !fields.value[id] && !fieldFailed.value[id]
+  return !!fieldPending.value[id] && !fields.value[id] && !fieldErrors.value[id]
 }
 
 function fieldErrorText(e: unknown) {
-  if (e instanceof Error && e.message && e.message !== "empty-field") return e.message
+  const status = (e as { statusCode?: number; status?: number } | null)?.statusCode
+    ?? (e as { status?: number } | null)?.status
+  const msg = e instanceof Error ? e.message : ""
+  if (
+    status === 429
+    || msg.includes("429")
+    || msg.includes("open-meteo-429")
+    || msg.toLowerCase().includes("rate")
+  ) {
+    return t("forecast.rateLimited")
+  }
+  if (status === 500 || status === 502 || status === 503 || msg === "empty-field") {
+    return t("forecast.noData")
+  }
+  if (msg && msg.length < 80 && msg !== "empty-field") return msg
   return t("forecast.fieldFail")
 }
 
@@ -373,20 +395,35 @@ async function fetchFieldOnce(id: string, bbox: GeoBbox) {
     north: bbox.north,
   }
   const data = await $fetch<ScalarField>(resolveApi("/api/field"), { query, timeout: 12000 })
-  if (!fieldHasSignal(data)) {
-    throw new Error("empty-field")
+  if (data?.error || data?.unavailable || !fieldHasSignal(data)) {
+    throw new Error(data?.error || "empty-field")
   }
   rememberField(key, data)
   return data
 }
 
+async function retryField(id: string) {
+  const bbox = viewBbox.value || CHINA_BBOX
+  const next = { ...fieldErrors.value }
+  delete next[id]
+  fieldErrors.value = next
+  fieldPending.value = { ...fieldPending.value, [id]: true }
+  try {
+    const data = await fetchFieldOnce(id, bbox)
+    fields.value = { ...fields.value, [id]: data }
+  } catch (e: unknown) {
+    fieldErrors.value = { ...fieldErrors.value, [id]: fieldErrorText(e) }
+  } finally {
+    fieldPending.value = { ...fieldPending.value, [id]: false }
+  }
+}
+
 async function loadFields() {
-  fieldError.value = ""
   const gen = ++fieldGen
   const bbox = viewBbox.value || CHINA_BBOX
   const ids = mapsToShow.value
   const kept: Record<string, ScalarField> = {}
-  const failed: Record<string, boolean> = {}
+  const errors: Record<string, string> = {}
   const pending: Record<string, boolean> = {}
   for (const id of ids) {
     pending[id] = true
@@ -394,7 +431,7 @@ async function loadFields() {
     if (prev && fieldHasSignal(prev) && prev.variable === variable.value) kept[id] = prev
   }
   fields.value = kept
-  fieldFailed.value = failed
+  fieldErrors.value = errors
   fieldPending.value = pending
   fieldLoading.value = true
 
@@ -415,17 +452,16 @@ async function loadFields() {
           const data = await fetchFieldOnce(id, bbox)
           if (gen !== fieldGen) return
           fields.value = { ...fields.value, [id]: data }
-          if (fieldFailed.value[id]) {
-            const next = { ...fieldFailed.value }
+          if (fieldErrors.value[id]) {
+            const next = { ...fieldErrors.value }
             delete next[id]
-            fieldFailed.value = next
+            fieldErrors.value = next
           }
         } catch (e: unknown) {
           if (gen !== fieldGen) return
           if (!fields.value[id]) {
-            failed[id] = true
-            fieldFailed.value = { ...fieldFailed.value, [id]: true }
-            fieldError.value = fieldErrorText(e)
+            errors[id] = fieldErrorText(e)
+            fieldErrors.value = { ...fieldErrors.value, [id]: errors[id] }
           }
         } finally {
           markDone(id)
