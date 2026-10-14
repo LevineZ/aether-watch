@@ -11,12 +11,13 @@
 import maplibregl from "maplibre-gl"
 import "maplibre-gl/dist/maplibre-gl.css"
 import { restyleGlobe, paintStars } from "~/utils/globeStyle"
-import { fieldCorners, rasterizeField, type ScalarField } from "~/utils/rasterField"
+import type { ScalarField } from "~/utils/rasterField"
+import { ScalarFieldLayer, signalPalette } from "~/utils/fieldLayer"
 import { WindParticleLayer, type FlowKind } from "~/utils/windLayer"
 import type { Wind } from "~/utils/windField"
 import type { Palette } from "~/utils/colormap"
 import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_DARK } from "~/utils/mapLabels"
-import { addChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
+import { applyChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
 
 const props = defineProps<{
   flow: Wind | null
@@ -35,31 +36,24 @@ const ready = ref(false)
 
 let map: maplibregl.Map | null = null
 let layer: WindParticleLayer | null = null
+let scalarLayer: ScalarFieldLayer | null = null
 let ro: ResizeObserver | null = null
 
+function firstSymbolId(ml: maplibregl.Map) {
+  return ml.getStyle()?.layers?.find((l) => l.type === "symbol")?.id
+}
+
 function paintOverlay() {
-  if (!map?.isStyleLoaded()) return
-  const field = props.field
-  if (!field) {
-    if (map.getLayer("scalar")) map.setLayoutProperty("scalar", "visibility", "none")
-    return
-  }
-  const url = rasterizeField(field, props.palette || "thermal", 512, 256)
-  const coordinates = fieldCorners(field)
-  const src = map.getSource("scalar") as maplibregl.ImageSource | undefined
-  if (src) {
-    src.updateImage({ url, coordinates })
-  } else {
-    map.addSource("scalar", { type: "image", url, coordinates })
-    map.addLayer({
-      id: "scalar",
-      type: "raster",
-      source: "scalar",
-      paint: { "raster-opacity": 0.72, "raster-fade-duration": 0 },
-    })
-  }
-  if (map.getLayer("scalar")) map.setLayoutProperty("scalar", "visibility", "visible")
+  if (!map?.isStyleLoaded() || !scalarLayer) return
+  const field = props.field || null
+  const palette = props.palette || "thermal"
+  scalarLayer.setField(field, palette, {
+    signalAlpha: signalPalette(palette),
+    opacity: signalPalette(palette) ? 0.86 : 0.42,
+  })
+  layer?.setVisible(!field)
   raiseChinaBorders(map)
+  map.triggerRepaint()
 }
 
 function onResize() {
@@ -76,8 +70,8 @@ onMounted(async () => {
   layer = new WindParticleLayer()
   layer.kind = props.kind || "current"
   layer.playing = props.playing !== false
-  // Currents seed/advect only in water (0.5° land mask). Wind is allowed over land.
   if (props.flow) layer.setField(props.flow, props.kind || "current")
+  scalarLayer = new ScalarFieldLayer()
 
   let style: string | object = OPENFREEMAP_DARK
   try {
@@ -103,13 +97,16 @@ onMounted(async () => {
   })
   map.touchPitch.disable()
   map.on("style.load", () => {
-    if (!map || !layer) return
+    if (!map || !layer || !scalarLayer) return
     restyleGlobe(map, locale.value)
+    const before = firstSymbolId(map)
+    if (!map.getLayer(scalarLayer.id)) {
+      if (before) map.addLayer(scalarLayer, before)
+      else map.addLayer(scalarLayer)
+    }
     if (!map.getLayer(layer.id)) map.addLayer(layer)
     paintOverlay()
-    void addChinaBorders(map, { url: resolveApi("/api/geo/china-bounds.json"), theme: "dark" }).then(() => {
-      if (map) raiseChinaBorders(map)
-    })
+    void applyChinaBorders(map, "globe").then(() => raiseChinaBorders(map))
     ready.value = true
     emit("ready")
   })
@@ -122,6 +119,7 @@ watch(
   () => [props.flow, props.kind] as const,
   () => {
     layer?.setField(props.flow, props.kind || "current")
+    layer?.setVisible(!props.field)
   },
 )
 
@@ -140,13 +138,21 @@ watch(
 watch(locale, (lang) => {
   if (map?.isStyleLoaded()) {
     restyleGlobe(map, lang)
-    raiseChinaBorders(map)
+    applyPlaceLabels(map, lang)
+    applyChinaBorders(map, "globe")
   }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", onResize)
   ro?.disconnect()
+  if (map && scalarLayer && map.getLayer(scalarLayer.id)) {
+    try {
+      map.removeLayer(scalarLayer.id)
+    } catch {
+      /* already gone */
+    }
+  }
   if (map && layer && map.getLayer(layer.id)) {
     try {
       map.removeLayer(layer.id)
@@ -157,6 +163,7 @@ onBeforeUnmount(() => {
   map?.remove()
   map = null
   layer = null
+  scalarLayer = null
 })
 </script>
 

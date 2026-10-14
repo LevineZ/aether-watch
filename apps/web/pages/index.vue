@@ -134,7 +134,7 @@ const srcState = ref<{
   src?: string
 }>({ mode: "req-current" })
 const globeReady = ref(false)
-const clock = computed(() => beijingStamp(undefined, locale.value).clock)
+const clock = computed(() => beijingStamp(scalar.value?.valid_time || undefined, locale.value).clock)
 const loadGen = ref(0)
 const source = computed(() => {
   const s = srcState.value
@@ -232,6 +232,7 @@ async function load() {
     return
   }
   flow.value = null
+  scalar.value = null
   srcState.value = { mode: "req-field", kind: elName(el) }
   try {
     const data = await $fetch<ScalarField>(resolveApi("/api/field"), {

@@ -1,4 +1,9 @@
-"""Live Open-Meteo client. No API key for non-commercial use."""
+"""Live Open-Meteo client. No API key for non-commercial use.
+
+Never hammer the free API: concurrency defaults to 1, batches stay small,
+requests are paced, and 429s use exponential backoff + Retry-After.
+Redis cache (and a longer-lived last-good copy) is preferred over a refetch.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +11,17 @@ import asyncio
 import json
 import logging
 import math
-from typing import Any, Awaitable, Callable
+import random
+import time
+from typing import Any
 
 import httpx
 import numpy as np
 import redis.asyncio as redis
 
-from app.catalog import CHINA_BBOX, CURRENT_BY_ID, ELEMENT_BY_ID, PREVIEW_BY_ID
+from app.catalog import CHINA_BBOX, CHINA_SEAS_BBOX, CURRENT_BY_ID, ELEMENT_BY_ID, PREVIEW_BY_ID
 from app.config import settings
+from app.fieldmeta import field_clock
 from app.landmask import apply_ocean_mask, is_land
 
 USER_AGENT = "AetherWatch/0.1 (local observation; docker compose)"
@@ -21,15 +29,60 @@ log = logging.getLogger("aetherwatch.openmeteo")
 
 _http: httpx.AsyncClient | None = None
 _redis: redis.Redis | None = None
-_om_sem: asyncio.Semaphore | None = None
-_inflight: dict[str, asyncio.Task] = {}
-LAST_SUFFIX = ":last"
-OM_LOCK_KEY = "aetherwatch:om:lock"
-LIVE_PREFIXES = ("field:", "currents:", "wind:", "series:", "catalog:")
+_om_gate: asyncio.Semaphore | None = None
+_pace_lock: asyncio.Lock | None = None
+_next_ok: float = 0.0
 
 
-class OpenMeteoRateLimit(Exception):
-    """Upstream 429 / 5xx after retries."""
+def om_gate() -> asyncio.Semaphore:
+    global _om_gate
+    if _om_gate is None:
+        _om_gate = asyncio.Semaphore(max(1, settings.open_meteo_concurrency))
+    return _om_gate
+
+
+def retry_wait_seconds(
+    attempt: int,
+    retry_after: str | None = None,
+    *,
+    base: float | None = None,
+    cap: float | None = None,
+    jitter: bool = True,
+) -> float:
+    """Exponential backoff for 429 / transient Open-Meteo errors.
+
+    attempt is 1-based. Retry-After (seconds) wins when parseable.
+    """
+    cap_s = float(cap if cap is not None else settings.open_meteo_backoff_cap_seconds)
+    if retry_after:
+        try:
+            return min(cap_s, max(1.0, float(retry_after.strip())))
+        except ValueError:
+            pass
+    base_s = float(base if base is not None else settings.open_meteo_backoff_base)
+    raw = min(cap_s, base_s ** max(1, attempt))
+    if not jitter:
+        return raw
+    return raw * (1.0 + random.uniform(0.05, 0.2))
+
+
+def _pace_lock_get() -> asyncio.Lock:
+    global _pace_lock
+    if _pace_lock is None:
+        _pace_lock = asyncio.Lock()
+    return _pace_lock
+
+
+async def pace_open_meteo() -> None:
+    """Serialize outbound Open-Meteo calls with a minimum gap."""
+    global _next_ok
+    gap = max(0.2, float(settings.open_meteo_min_interval_seconds))
+    async with _pace_lock_get():
+        now = time.monotonic()
+        wait = _next_ok - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _next_ok = time.monotonic() + gap
 
 
 async def http() -> httpx.AsyncClient:
@@ -75,24 +128,30 @@ async def cache_set(key: str, value: Any, ttl: int) -> None:
         return
 
 
-async def cache_set_live_and_last(key: str, value: Any, ttl: int) -> None:
+async def cache_remember(key: str, value: Any, ttl: int) -> None:
+    """Write the live key plus a longer-lived last-good copy."""
     await cache_set(key, value, ttl)
-    last_ttl = max(ttl, settings.last_good_ttl_seconds)
-    await cache_set(f"{key}{LAST_SUFFIX}", value, last_ttl)
+    last_ttl = max(ttl, settings.open_meteo_stale_ttl_seconds, settings.last_good_ttl_seconds)
+    await cache_set(f"{key}:last", value, last_ttl)
 
 
-def _mark_stale(hit: dict[str, Any], reason: str = "open-meteo-429") -> dict[str, Any]:
-    hit["cached"] = True
-    hit["stale"] = True
-    hit["degraded"] = reason
-    return hit
+async def cache_set_live_and_last(key: str, value: Any, ttl: int) -> None:
+    await cache_remember(key, value, ttl)
 
 
-async def cache_last(key: str, reason: str = "open-meteo-429") -> Any | None:
-    hit = await cache_get(f"{key}{LAST_SUFFIX}")
-    if not hit:
-        return None
-    return _mark_stale(hit, reason)
+async def cache_get_prefer(key: str) -> Any | None:
+    hit = await cache_get(key)
+    if hit:
+        return hit
+    last = await cache_get(f"{key}:last")
+    if last:
+        last["cached"] = True
+        last["stale"] = True
+        last.setdefault("degraded", "open-meteo-stale")
+    return last
+
+
+LIVE_PREFIXES = ("field:", "currents:", "wind:", "series:", "catalog:")
 
 
 async def flush_live_cache() -> int:
@@ -106,7 +165,7 @@ async def flush_live_cache() -> int:
         async for key in r.scan_iter(match="*"):
             if not isinstance(key, str):
                 continue
-            if key.endswith(LAST_SUFFIX) or key in {OM_LOCK_KEY, "aetherwatch:visitors"}:
+            if key.endswith(":last") or key in {"aetherwatch:visitors"}:
                 continue
             if key.startswith(LIVE_PREFIXES):
                 await r.delete(key)
@@ -114,98 +173,6 @@ async def flush_live_cache() -> int:
     except Exception as exc:
         log.warning("flush live cache: %s", exc)
     return n
-
-
-def _om_sem_get() -> asyncio.Semaphore:
-    global _om_sem
-    if _om_sem is None:
-        _om_sem = asyncio.Semaphore(max(1, settings.open_meteo_concurrency))
-    return _om_sem
-
-
-async def _singleflight(key: str, factory: Callable[[], Awaitable[Any]]) -> Any:
-    existing = _inflight.get(key)
-    if existing is not None and not existing.done():
-        return await existing
-    task = asyncio.create_task(factory())
-    _inflight[key] = task
-    try:
-        return await task
-    finally:
-        if _inflight.get(key) is task:
-            _inflight.pop(key, None)
-
-
-async def om_get(url: str, params: dict[str, Any]) -> Any:
-    """Serialized Open-Meteo GET with exponential backoff on 429/5xx.
-
-    Process semaphore + Redis lock so API and worker do not stampede the same host.
-    """
-    client = await http()
-    retries = max(0, settings.open_meteo_max_retries)
-    delay = max(0.25, float(settings.open_meteo_backoff_base))
-    last_exc: Exception | None = None
-    async with _om_sem_get():
-        rds = None
-        got_lock = False
-        try:
-            rds = await cache()
-            for _ in range(80):
-                try:
-                    got_lock = bool(
-                        await asyncio.wait_for(rds.set(OM_LOCK_KEY, "1", nx=True, ex=90), timeout=1.5)
-                    )
-                except Exception:
-                    got_lock = False
-                    rds = None
-                    break
-                if got_lock:
-                    break
-                await asyncio.sleep(0.25)
-        except Exception:
-            rds = None
-        try:
-            for attempt in range(retries + 1):
-                try:
-                    resp = await client.get(url, params=params)
-                    if resp.status_code == 429 or resp.status_code >= 500:
-                        sleep_s = delay
-                        ra = resp.headers.get("Retry-After")
-                        if ra:
-                            try:
-                                sleep_s = float(ra)
-                            except ValueError:
-                                sleep_s = delay
-                        last_exc = OpenMeteoRateLimit(f"{resp.status_code} {url}")
-                        if attempt >= retries:
-                            raise last_exc
-                        log.warning(
-                            "open-meteo %s, backoff %.1fs (attempt %s/%s)",
-                            resp.status_code,
-                            sleep_s,
-                            attempt + 1,
-                            retries + 1,
-                        )
-                        await asyncio.sleep(min(sleep_s, 32.0))
-                        delay = min(delay * 2, 32.0)
-                        continue
-                    resp.raise_for_status()
-                    return resp.json()
-                except OpenMeteoRateLimit:
-                    raise
-                except Exception as exc:
-                    last_exc = exc
-                    if attempt >= retries:
-                        raise
-                    await asyncio.sleep(min(delay, 32.0))
-                    delay = min(delay * 2, 32.0)
-            raise last_exc or RuntimeError("open-meteo failed")
-        finally:
-            if rds is not None and got_lock:
-                try:
-                    await rds.delete(OM_LOCK_KEY)
-                except Exception:
-                    pass
 
 
 async def incr_visitors() -> int:
@@ -236,37 +203,15 @@ async def fetch_series(
     element = ELEMENT_BY_ID.get(variable, ELEMENT_BY_ID["temperature_2m"])
     om_var = element["om"]
     cache_key = f"series:{lat:.3f}:{lon:.3f}:{om_var}:{','.join(models)}:{forecast_days}"
-    hit = await cache_get(cache_key)
+    hit = await cache_get_prefer(cache_key)
     if hit:
         hit["cached"] = True
         return hit
 
-    async def _load() -> dict[str, Any]:
-        return await _fetch_series_uncached(lat, lon, variable, models, forecast_days, cache_key, om_var, element)
-
-    return await _singleflight(cache_key, _load)
-
-
-async def _fetch_series_uncached(
-    lat: float,
-    lon: float,
-    variable: str,
-    models: list[str],
-    forecast_days: int,
-    cache_key: str,
-    om_var: str,
-    element: dict[str, Any],
-) -> dict[str, Any]:
-    hit = await cache_get(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
-
+    client = await http()
     model_payloads: dict[str, dict[str, Any]] = {}
-    rate_limited = False
 
     async def one(model: str) -> tuple[str, dict[str, Any] | None, str | None]:
-        nonlocal rate_limited
         params = {
             "latitude": f"{lat:.4f}",
             "longitude": f"{lon:.4f}",
@@ -281,17 +226,14 @@ async def _fetch_series_uncached(
             params["hourly"] = "surface_pressure,pressure_msl"
         url = f"{settings.open_meteo_base.rstrip('/')}/v1/forecast"
         try:
-            payload = await om_get(url, params)
-            return model, payload, None
-        except OpenMeteoRateLimit as exc:
-            rate_limited = True
-            return model, None, str(exc)
+            data = await _om_json(client, url, params)
+            return model, data, None
         except Exception as exc:
             return model, None, str(exc)
 
     results: list[tuple[str, dict[str, Any] | None, str | None]] = []
-    for m in models:
-        results.append(await one(m))
+    for model in models:
+        results.append(await one(model))
     times: list[str] | None = None
     errors: dict[str, str] = {}
     for model, payload, err in results:
@@ -334,11 +276,12 @@ async def _fetch_series_uncached(
         "cached": False,
     }
     if model_payloads:
-        await cache_set_live_and_last(cache_key, out, settings.cache_ttl_seconds)
-        return out
-    stale = await cache_last(cache_key, "open-meteo-429" if rate_limited else "open-meteo-empty")
-    if stale:
-        return stale
+        await cache_remember(cache_key, out, settings.cache_ttl_seconds)
+    else:
+        stale = await cache_get_prefer(cache_key)
+        if stale:
+            stale["cached"] = True
+            return stale
     return out
 
 
@@ -347,39 +290,51 @@ async def _gather_batches(
     fetch_chunk,
     batch_size: int | None = None,
 ) -> list[dict[str, Any] | None]:
-    """Fetch Open-Meteo multi-location chunks with a concurrency cap (rate-limit friendly)."""
-    size = max(4, batch_size or settings.open_meteo_batch_size)
-    conc = max(1, settings.open_meteo_concurrency)
+    """Fetch Open-Meteo multi-location chunks one-at-a-time (never hammer)."""
+    size = max(4, min(80, batch_size or settings.open_meteo_batch_size))
     chunks = [points[i : i + size] for i in range(0, len(points), size)]
-    groups: list[list[dict[str, Any] | None]] = []
-
-    if conc <= 1:
-        for i, chunk in enumerate(chunks):
-            try:
-                groups.append(await fetch_chunk(chunk))
-            except OpenMeteoRateLimit:
-                groups.append([None] * len(chunk))
-                for rest in chunks[i + 1 :]:
-                    groups.append([None] * len(rest))
-                break
-            except Exception:
-                groups.append([None] * len(chunk))
-    else:
-        sem = asyncio.Semaphore(conc)
-
-        async def one(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
-            async with sem:
-                try:
-                    return await fetch_chunk(chunk)
-                except Exception:
-                    return [None] * len(chunk)
-
-        groups = await asyncio.gather(*[one(c) for c in chunks])
-
+    gate = om_gate()
     out: list[dict[str, Any] | None] = []
-    for g in groups:
-        out.extend(g)
+    for chunk in chunks:
+        async with gate:
+            try:
+                group = await fetch_chunk(chunk)
+            except Exception:
+                group = [None] * len(chunk)
+        out.extend(group)
     return out
+
+
+async def _om_json(client: httpx.AsyncClient, url: str, params: dict[str, str]) -> Any:
+    """POST first (large multi-location bodies); GET fallback; exponential 429 backoff."""
+    last: Exception | None = None
+    retries = max(2, settings.open_meteo_max_retries)
+    for attempt in range(1, retries + 1):
+        await pace_open_meteo()
+        try:
+            r = await client.post(url, data=params)
+            if r.status_code not in (200, 429) and r.status_code < 500:
+                r = await client.get(url, params=params)
+            if r.status_code == 429:
+                wait = retry_wait_seconds(attempt, r.headers.get("Retry-After"))
+                log.warning("open-meteo 429 on %s — backing off %.1fs (attempt %s/%s)", url, wait, attempt, retries)
+                await asyncio.sleep(wait)
+                last = RuntimeError("open-meteo 429")
+                continue
+            if r.status_code >= 500:
+                wait = retry_wait_seconds(attempt)
+                log.warning("open-meteo %s on %s — retry in %.1fs", r.status_code, url, wait)
+                await asyncio.sleep(wait)
+                last = RuntimeError(f"open-meteo {r.status_code}")
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            last = exc
+            await asyncio.sleep(retry_wait_seconds(attempt, jitter=True) * 0.35)
+    if last:
+        raise last
+    raise RuntimeError("open-meteo empty")
 
 
 def _grid_points(bbox: dict[str, float], nx: int, ny: int) -> tuple[list[float], list[float]]:
@@ -402,32 +357,10 @@ async def fetch_field(
     element = ELEMENT_BY_ID.get(variable, ELEMENT_BY_ID["temperature_2m"])
     om_var = element["om"]
     cache_key = (
-        f"field:{model}:{om_var}:{bbox['west']}:{bbox['south']}:{bbox['east']}:{bbox['north']}"
+        f"field:v4:{model}:{om_var}:{bbox['west']}:{bbox['south']}:{bbox['east']}:{bbox['north']}"
         f":{nx}x{ny}:{step}"
     )
-    hit = await cache_get(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
-
-    async def _load() -> dict[str, Any]:
-        return await _fetch_field_uncached(model, variable, bbox, nx, ny, step, cache_key, om_var, element)
-
-    return await _singleflight(cache_key, _load)
-
-
-async def _fetch_field_uncached(
-    model: str,
-    variable: str,
-    bbox: dict[str, float],
-    nx: int,
-    ny: int,
-    step: int,
-    cache_key: str,
-    om_var: str,
-    element: dict[str, Any],
-) -> dict[str, Any]:
-    hit = await cache_get(cache_key)
+    hit = await cache_get_prefer(cache_key)
     if hit:
         hit["cached"] = True
         return hit
@@ -435,7 +368,9 @@ async def _fetch_field_uncached(
     lats, lons = _grid_points(bbox, nx, ny)
     points: list[tuple[float, float]] = [(lat, lon) for lat in lats for lon in lons]
 
+    client = await http()
     values = np.full((ny, nx), np.nan, dtype=float)
+    init_time: str | None = None
     valid_time: str | None = None
 
     async def batch(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
@@ -451,7 +386,7 @@ async def _fetch_field_uncached(
             "wind_speed_unit": "ms",
         }
         url = f"{settings.open_meteo_base.rstrip('/')}/v1/forecast"
-        data = await om_get(url, params)
+        data = await _om_json(client, url, params)
         # multi-location returns a list; single returns an object
         if isinstance(data, list):
             return data
@@ -473,7 +408,7 @@ async def _fetch_field_uncached(
         si = min(max(step, 0), len(series) - 1)
         val = series[si]
         if times and valid_time is None:
-            valid_time = times[si]
+            init_time, valid_time = field_clock(times, step)
         row = idx // nx
         col = idx % nx
         if val is not None:
@@ -484,12 +419,17 @@ async def _fetch_field_uncached(
     vmax = float(np.max(finite)) if finite.size else 1.0
     out = {
         "model": model,
+        "model_id": model,
         "variable": variable,
         "unit": element["unit"],
         "label": element["label"],
         "label_en": element["label_en"],
+        "init_time": init_time,
         "valid_time": valid_time,
+        "lead_hours": step,
         "step": step,
+        "kind": "model_forecast",
+        "provider": "open-meteo",
         "bbox": bbox,
         "lats": lats,
         "lons": lons,
@@ -497,46 +437,32 @@ async def _fetch_field_uncached(
         "min": round(vmin, 3),
         "max": round(vmax, 3),
         "source": f"open-meteo:{model}",
+        "source_note": "near-real-time numerical model forecast, not station observations",
         "cached": False,
         "nx": nx,
         "ny": ny,
     }
-    coverage = finite.size / max(1, nx * ny)
-    if coverage >= 0.35:
-        await cache_set_live_and_last(cache_key, out, settings.cache_ttl_seconds)
-        return out
-    stale = await cache_last(cache_key, "open-meteo-sparse")
-    if stale:
-        return stale
     if finite.size:
-        await cache_set(cache_key, out, min(300, settings.cache_ttl_seconds))
+        await cache_remember(cache_key, out, settings.cache_ttl_seconds)
+    else:
+        stale = await cache_get_prefer(cache_key)
+        if stale:
+            stale["cached"] = True
+            return stale
     return out
 
 
 async def fetch_wind_grid(model: str = "gfs_seamless", nx: int = 24, ny: int = 12) -> dict[str, Any]:
     bbox = {"west": -180.0, "south": -70.0, "east": 180.0, "north": 70.0}
-    cache_key = f"wind:{model}:{nx}x{ny}"
-    hit = await cache_get(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
-
-    async def _load() -> dict[str, Any]:
-        return await _fetch_wind_uncached(model, nx, ny, bbox, cache_key)
-
-    return await _singleflight(cache_key, _load)
-
-
-async def _fetch_wind_uncached(
-    model: str, nx: int, ny: int, bbox: dict[str, float], cache_key: str
-) -> dict[str, Any]:
-    hit = await cache_get(cache_key)
+    cache_key = f"wind:v2:{model}:{nx}x{ny}"
+    hit = await cache_get_prefer(cache_key)
     if hit:
         hit["cached"] = True
         return hit
 
     lats, lons = _grid_points(bbox, nx, ny)
     points = [(lat, lon) for lat in reversed(lats) for lon in lons]  # north → south
+    client = await http()
     u = np.zeros((ny, nx), dtype=float)
     v = np.zeros((ny, nx), dtype=float)
 
@@ -553,7 +479,7 @@ async def _fetch_wind_uncached(
             "wind_speed_unit": "ms",
         }
         url = f"{settings.open_meteo_base.rstrip('/')}/v1/forecast"
-        data = await om_get(url, params)
+        data = await _om_json(client, url, params)
         return data if isinstance(data, list) else [data]
 
     payloads = await _gather_batches(points, batch)
@@ -580,14 +506,15 @@ async def _fetch_wind_uncached(
         filled += 1
 
     if filled < 8:
-        stale = await cache_last(cache_key, "open-meteo-sparse")
+        stale = await cache_get_prefer(cache_key)
         if stale:
+            stale["cached"] = True
             return stale
         # last-resort synthetic field so the globe still animates offline
         return synthetic_wind(nx, ny, bbox, reason="open-meteo-sparse")
 
     out = _vector_payload(nx, ny, bbox, u, v, f"open-meteo:{model}", filled, kind="wind")
-    await cache_set_live_and_last(cache_key, out, settings.wind_cache_ttl_seconds)
+    await cache_remember(cache_key, out, settings.wind_cache_ttl_seconds)
     return out
 
 
@@ -636,36 +563,53 @@ def _speed_unit_scale(unit: str | None) -> float:
     return 1.0
 
 
-async def fetch_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
-    """Surface ocean currents from Open-Meteo Marine (no API key)."""
-    bbox = {"west": -180.0, "south": -70.0, "east": 180.0, "north": 70.0}
-    nx = int(nx or settings.current_nx)
-    ny = int(ny or settings.current_ny)
-    marine_model = model if model in CURRENT_BY_ID else "best_match"
-    cache_key = f"currents:{marine_model}:{nx}x{ny}:oceanmask"
-    hit = await cache_get(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
+def _fill_ocean_gaps(u: np.ndarray, v: np.ndarray, bbox: dict[str, float]) -> None:
+    """Bilinear-ish fill for empty ocean cells so SCS/China seas are not holes."""
+    ny, nx = u.shape
+    lons = np.linspace(bbox["west"], bbox["east"], nx)
+    lats = np.linspace(bbox["north"], bbox["south"], ny)
+    ocean = np.zeros((ny, nx), dtype=bool)
+    for j in range(ny):
+        for i in range(nx):
+            ocean[j, i] = not is_land(float(lons[i]), float(lats[j]))
+    for _ in range(4):
+        nu, nv = u.copy(), v.copy()
+        changed = False
+        for j in range(ny):
+            for i in range(nx):
+                if not ocean[j, i]:
+                    continue
+                if abs(u[j, i]) + abs(v[j, i]) > 1e-6:
+                    continue
+                acc_u = acc_v = 0.0
+                n = 0
+                for dj, di in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    y, x = j + dj, i + di
+                    if 0 <= y < ny and 0 <= x < nx and ocean[y, x] and abs(u[y, x]) + abs(v[y, x]) > 1e-6:
+                        acc_u += u[y, x]
+                        acc_v += v[y, x]
+                        n += 1
+                if n:
+                    nu[j, i] = acc_u / n
+                    nv[j, i] = acc_v / n
+                    changed = True
+        u[:] = nu
+        v[:] = nv
+        if not changed:
+            break
 
-    async def _load() -> dict[str, Any]:
-        return await _fetch_current_uncached(marine_model, nx, ny, bbox, cache_key)
 
-    return await _singleflight(cache_key, _load)
-
-
-async def _fetch_current_uncached(
-    marine_model: str, nx: int, ny: int, bbox: dict[str, float], cache_key: str
-) -> dict[str, Any]:
-    hit = await cache_get(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
-
+async def _fetch_current_patch(
+    marine_model: str,
+    bbox: dict[str, float],
+    nx: int,
+    ny: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
     lats, lons = _grid_points(bbox, nx, ny)
     points = [(lat, lon) for lat in reversed(lats) for lon in lons]
     u = np.zeros((ny, nx), dtype=float)
     v = np.zeros((ny, nx), dtype=float)
+    client = await http()
     marine = settings.open_meteo_marine_base.rstrip("/")
     ocean_idx = [(i, lat, lon) for i, (lat, lon) in enumerate(points) if not is_land(lon, lat)]
     ocean_pts = [(lat, lon) for _, lat, lon in ocean_idx]
@@ -683,24 +627,21 @@ async def _fetch_current_uncached(
             "wind_speed_unit": "ms",
             "cell_selection": "sea",
         }
-        url = f"{marine}/v1/marine"
-        data = await om_get(url, params)
+        data = await _om_json(client, f"{marine}/v1/marine", params)
         return data if isinstance(data, list) else [data]
 
     payloads = await _gather_batches(ocean_pts, batch)
-
     filled = 0
     for (idx, req_lat, req_lon), payload in zip(ocean_idx, payloads, strict=False):
         if not payload:
             continue
-        # cell_selection=sea snaps land queries onto nearby ocean; drop those.
         act_lat = payload.get("latitude")
         act_lon = payload.get("longitude")
         if act_lat is not None and act_lon is not None:
             dlat = float(act_lat) - req_lat
             dlon = ((float(act_lon) - req_lon + 180.0) % 360.0) - 180.0
             dist = math.hypot(dlat, dlon * math.cos(math.radians(req_lat)))
-            if dist > 1.15:
+            if dist > 1.35:
                 continue
         hourly = payload.get("hourly") or {}
         units = payload.get("hourly_units") or {}
@@ -713,27 +654,62 @@ async def _fetch_current_uncached(
         scale = _speed_unit_scale(str(units.get(spd_key) or "m/s"))
         speed = float(spd) * scale
         rad = math.radians(float(cdir))
-        # oceanographic direction: TOWARDS which the current flows
-        uu = speed * math.sin(rad)
-        vv = speed * math.cos(rad)
         row = idx // nx
         col = idx % nx
-        u[row, col] = uu
-        v[row, col] = vv
+        u[row, col] = speed * math.sin(rad)
+        v[row, col] = speed * math.cos(rad)
         filled += 1
+    _fill_ocean_gaps(u, v, bbox)
+    return u, v, filled
 
+
+async def fetch_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
+    """Surface ocean currents from Open-Meteo Marine, plus a China-seas nest."""
+    bbox = {"west": -180.0, "south": -70.0, "east": 180.0, "north": 70.0}
+    nx = int(nx or settings.current_nx)
+    ny = int(ny or settings.current_ny)
+    marine_model = model if model in CURRENT_BY_ID else "best_match"
+    cache_key = f"currents:v3:{marine_model}:{nx}x{ny}:nest"
+    hit = await cache_get_prefer(cache_key)
+    if hit:
+        hit["cached"] = True
+        return hit
+
+    u, v, filled = await _fetch_current_patch(marine_model, bbox, nx, ny)
     if filled < 8:
-        stale = await cache_last(cache_key, "open-meteo-marine-sparse")
+        stale = await cache_get_prefer(cache_key)
         if stale:
+            stale["cached"] = True
             return stale
         return synthetic_currents(nx, ny, bbox, reason="open-meteo-marine-sparse")
 
     out = apply_ocean_mask(
-        _vector_payload(
-            nx, ny, bbox, u, v, f"open-meteo-marine:{marine_model}", filled, kind="currents"
-        )
+        _vector_payload(nx, ny, bbox, u, v, f"open-meteo-marine:{marine_model}", filled, kind="currents")
     )
-    await cache_set_live_and_last(cache_key, out, settings.current_cache_ttl_seconds)
+    try:
+        nest_u, nest_v, nest_filled = await _fetch_current_patch(
+            marine_model,
+            CHINA_SEAS_BBOX,
+            settings.current_nest_nx,
+            settings.current_nest_ny,
+        )
+        if nest_filled >= 6:
+            nest = apply_ocean_mask(
+                _vector_payload(
+                    settings.current_nest_nx,
+                    settings.current_nest_ny,
+                    CHINA_SEAS_BBOX,
+                    nest_u,
+                    nest_v,
+                    f"open-meteo-marine:{marine_model}:china-seas",
+                    nest_filled,
+                    kind="currents",
+                )
+            )
+            out["nest"] = nest
+    except Exception:
+        pass
+    await cache_remember(cache_key, out, settings.current_cache_ttl_seconds)
     return out
 
 

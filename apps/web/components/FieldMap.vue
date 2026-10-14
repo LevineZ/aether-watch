@@ -5,7 +5,11 @@
         <i class="dot" :style="{ background: color }" />
         {{ title }}
       </h3>
-      <span v-if="field?.valid_time" class="map-valid" :title="validTitle">{{ validLabel }}</span>
+      <div class="map-meta">
+        <span class="map-clock">{{ t("forecast.init") }} {{ initLabel }}</span>
+        <span class="map-clock map-clock-valid">{{ t("forecast.valid") }} {{ validLabel }}</span>
+        <span class="map-src" :title="sourceTitle">{{ sourceLine }}</span>
+      </div>
       <div class="map-tools" role="group" :aria-label="t('forecast.ariaZoom')">
         <button type="button" class="mtool" :title="t('forecast.zoomOut')" :aria-label="t('forecast.zoomOut')" @click="emit('zoom-by', -0.7)">−</button>
         <button type="button" class="mtool" :title="t('forecast.zoomIn')" :aria-label="t('forecast.zoomIn')" @click="emit('zoom-by', 0.7)">+</button>
@@ -45,7 +49,8 @@ import {
   type MapCamera,
 } from "~/composables/useLinkedCamera"
 import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_POSITRON } from "~/utils/mapLabels"
-import { addChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
+import { applyChinaBorders, firstPrcLayerId, raiseChinaBorders } from "~/utils/chinaBorders"
+import { signalPalette } from "~/utils/fieldLayer"
 
 const props = withDefaults(
   defineProps<{
@@ -58,8 +63,13 @@ const props = withDefaults(
     camera: MapCamera
     driverId: string | null
     pick: { lat: number; lon: number }
+    initTime?: string | null
+    validTime?: string | null
+    source?: string | null
+    modelId?: string | null
+    leadHours?: number
   }>(),
-  { palette: "thermal", color: "#c1440e", loading: false },
+  { palette: "thermal", color: "#c1440e", loading: false, leadHours: 0 },
 )
 
 const emit = defineEmits<{
@@ -81,10 +91,13 @@ let applying = false
 const bar = computed(() => paletteCss(props.palette || "thermal"))
 const minLabel = computed(() => (props.field ? `${props.field.min.toFixed(1)}${props.field.unit || ""}` : "—"))
 const maxLabel = computed(() => (props.field ? `${props.field.max.toFixed(1)}${props.field.unit || ""}` : "—"))
-const validLabel = computed(() => beijingShort(props.field?.valid_time))
-const validTitle = computed(() =>
-  props.field?.valid_time ? t("forecast.validTitle", { time: beijingShort(props.field.valid_time) }) : "Open-Meteo",
-)
+const initLabel = computed(() => beijingShort(props.field?.init_time || props.initTime))
+const validLabel = computed(() => beijingShort(props.field?.valid_time || props.validTime))
+const sourceLine = computed(() => {
+  const model = props.field?.model_id || props.field?.model || props.modelId || ""
+  return t("forecast.sourceLine", { model: model || "open-meteo" })
+})
+const sourceTitle = computed(() => t("forecast.kindNote"))
 
 function snapshot(): MapCamera {
   if (!map) return props.camera
@@ -118,8 +131,10 @@ function paint() {
   const url = rasterizeField(
     props.field,
     props.palette || "thermal",
-    nx >= 24 ? 512 : 256,
-    ny >= 18 ? 384 : 192,
+    Math.min(2048, Math.max(960, nx * 32)),
+    Math.min(1536, Math.max(720, ny * 32)),
+    "bicubic",
+    { signalAlpha: signalPalette(props.palette || "thermal"), opacity: 188, prefilter: true },
   )
   const coordinates = fieldCorners(props.field)
   const src = map.getSource("field") as maplibregl.ImageSource | undefined
@@ -127,12 +142,20 @@ function paint() {
     src.updateImage({ url, coordinates })
   } else if (map.isStyleLoaded()) {
     map.addSource("field", { type: "image", url, coordinates })
-    map.addLayer({
-      id: "field",
-      type: "raster",
-      source: "field",
-      paint: { "raster-opacity": 0.84, "raster-fade-duration": 0 },
-    })
+    const before = firstPrcLayerId(map) || map.getStyle()?.layers?.find((l) => l.type === "symbol")?.id
+    map.addLayer(
+      {
+        id: "field",
+        type: "raster",
+        source: "field",
+        paint: {
+          "raster-opacity": 0.7,
+          "raster-fade-duration": 0,
+          "raster-resampling": "linear",
+        },
+      },
+      before,
+    )
   }
   raiseChinaBorders(map)
 }
@@ -174,7 +197,7 @@ onMounted(async () => {
     zoom: props.camera.zoom,
     bearing: props.camera.bearing,
     pitch: 0,
-    minZoom: 2.15,
+    minZoom: 1.85,
     maxZoom: 8.2,
     attributionControl: false,
     interactive: true,
@@ -198,9 +221,12 @@ onMounted(async () => {
     applyPlaceLabels(map!, locale.value)
     applyCamera(props.camera)
     paint()
+    void applyChinaBorders(map!, "paper").then(() => {
+      paint()
+      raiseChinaBorders(map!)
+    })
     placeMarker()
     map?.resize()
-    void addChinaBorders(map!, { url: resolveApi("/api/geo/china-bounds.json"), theme: "light" })
   })
   map.on("move", () => {
     if (applying) return
@@ -226,7 +252,7 @@ onMounted(async () => {
 })
 
 watch(
-  () => [props.field, props.palette] as const,
+  () => [props.field, props.palette, props.field?.valid_time, props.field?.model, props.field?.min, props.field?.max] as const,
   () => paint(),
 )
 
@@ -245,7 +271,10 @@ watch(
 )
 
 watch(locale, (lang) => {
-  if (map?.isStyleLoaded()) applyPlaceLabels(map, lang)
+  if (map?.isStyleLoaded()) {
+    applyPlaceLabels(map, lang)
+    applyChinaBorders(map, "paper")
+  }
 })
 
 onBeforeUnmount(() => {
@@ -270,11 +299,27 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 0.4rem;
 }
-.map-valid {
+.map-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.65rem;
+  margin-right: auto;
+  min-width: 0;
+}
+.map-clock {
   font-family: var(--font-mono);
   font-size: 0.68rem;
+  color: var(--ink-soft);
+}
+.map-clock-valid {
+  color: var(--accent);
+  font-weight: 650;
+}
+.map-src {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
   color: var(--ink-faint);
-  margin-right: auto;
 }
 .map-tools {
   display: inline-flex;

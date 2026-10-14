@@ -19,7 +19,30 @@ def _bits() -> np.ndarray:
     return _BITS
 
 
+def is_forced_ocean(lon: float, lat: float) -> bool:
+    """Open China-adjacent seas the 0.5° NE mask often paints as land."""
+    if 108.15 <= lon <= 120.9 and 3.6 <= lat <= 19.6:
+        if lon < 109.25 and lat < 16.6:
+            return False
+        if lon > 119.6 and lat < 8.2:
+            return False
+        return True
+    if 117.7 <= lon <= 121.3 and 22.1 <= lat <= 26.9:
+        return True
+    if 121.0 <= lon <= 128.6 and 24.4 <= lat <= 33.3:
+        if lon < 122.15 and lat > 30.6:
+            return False
+        return True
+    if 119.4 <= lon <= 126.6 and 33.0 <= lat <= 39.3:
+        if lon < 121.4 and lat > 36.6:
+            return False
+        return True
+    return False
+
+
 def is_land(lon: float, lat: float) -> bool:
+    if is_forced_ocean(lon, lat):
+        return False
     if lat < -85:
         return True
     x = int(((lon + 180.0) / 360.0) * NX) % NX
