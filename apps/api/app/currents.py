@@ -22,6 +22,7 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import numpy as np
@@ -44,6 +45,26 @@ CMEMS_TOKEN_URLS = (
     "https://identity.marine.copernicus.eu/auth/realms/eds/protocol/openid-connect/token",
 )
 CMEMS_CLIENT_IDS = ("copernicus-marine-client", "cds")
+# PO.DAAC cumulus S3 → Earthdata HTTPS (httpx cannot fetch s3://).
+PODAAC_S3_HTTPS = (
+    (
+        "s3://podaac-ops-cumulus-protected/",
+        "https://archive.podaac.earthdata.nasa.gov/podaac-ops-cumulus-protected/",
+    ),
+    (
+        "s3://podaac-ops-cumulus-public/",
+        "https://archive.podaac.earthdata.nasa.gov/podaac-ops-cumulus-public/",
+    ),
+)
+# OSCAR v2.0 NRT is 0.25°: latitude=719 (0..718) × longitude=1440 (0..1439).
+# Native layout is u(time, longitude, latitude). Last index is always size-1 (never size / size+1).
+OSCAR_NLAT = 719
+OSCAR_NLON = 1440
+OSCAR_LAT_LAST = OSCAR_NLAT - 1  # 718
+OSCAR_LON_LAST = OSCAR_NLON - 1  # 1439
+OSCAR_DAP_STRIDE = 4
+_LAT_DIMS = frozenset({"lat", "latitude", "y"})
+_LON_DIMS = frozenset({"lon", "longitude", "x"})
 
 _http: httpx.AsyncClient | None = None
 _earthdata_token: str | None = None
@@ -133,11 +154,76 @@ def wrap_lon_360(lon: np.ndarray) -> np.ndarray:
     return ((out + 180.0) % 360.0) - 180.0
 
 
+def axis_last(size: int) -> int:
+    """Inclusive last index for a 1-D axis. size 719 → 718; never size or size+1."""
+    n = int(size)
+    if n <= 0:
+        return 0
+    return n - 1
+
+
+def stride_indices(size: int, stride: int = 1) -> np.ndarray:
+    """0, stride, … ≤ size-1. Never includes size or size+1 (720 on a 719-long axis)."""
+    n = int(size)
+    step = max(int(stride), 1)
+    if n <= 0:
+        return np.zeros(0, dtype=int)
+    last = axis_last(n)
+    idx = np.arange(0, last + 1, step, dtype=int)
+    return idx[idx <= last]
+
+
+def opendap_hyperslab(size: int, stride: int = 1) -> str:
+    """DAP2 `start:stride:stop` with inclusive stop = size-1."""
+    return f"0:{max(int(stride), 1)}:{axis_last(size)}"
+
+
+def orient_uv_lat_lon(
+    u: np.ndarray,
+    v: np.ndarray,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    dims: tuple[str, ...] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return u/v as (nlat, nlon). OSCAR native arrays are (nlon, nlat) after dropping time."""
+    uu = np.asarray(u, dtype=float)
+    vv = np.asarray(v, dtype=float)
+    lon_axis = np.asarray(lons, dtype=float).reshape(-1)
+    lat_axis = np.asarray(lats, dtype=float).reshape(-1)
+    while uu.ndim > 2:
+        uu = uu[0]
+        vv = vv[0]
+    if uu.ndim != 2:
+        return uu, vv, lon_axis, lat_axis
+    nlat, nlon = int(lat_axis.size), int(lon_axis.size)
+    swap = False
+    if dims:
+        named = [str(d).lower() for d in dims if str(d).lower() not in {"time", "depth", "elevation", "lev", "z"}]
+        if len(named) >= 2:
+            d0, d1 = named[-2], named[-1]
+            if d0 in _LON_DIMS and d1 in _LAT_DIMS:
+                swap = True
+            elif d0 in _LAT_DIMS and d1 in _LON_DIMS:
+                swap = False
+    if not swap and uu.shape == (nlon, nlat) and uu.shape != (nlat, nlon):
+        swap = True
+    if swap:
+        uu = np.swapaxes(uu, -1, -2)
+        vv = np.swapaxes(vv, -1, -2)
+    return uu, vv, lon_axis, lat_axis
+
+
 def sort_lon_columns(
     lons: np.ndarray, u: np.ndarray, v: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    u = np.asarray(u)
+    v = np.asarray(v)
+    lons = np.asarray(lons)
+    if u.ndim == 2 and u.shape[1] != lons.size and u.shape[0] == lons.size:
+        u = np.swapaxes(u, -1, -2)
+        v = np.swapaxes(v, -1, -2)
     order = np.argsort(wrap_lon_360(lons))
-    return wrap_lon_360(lons)[order], np.asarray(u)[:, order], np.asarray(v)[:, order]
+    return wrap_lon_360(lons)[order], u[:, order], v[:, order]
 
 
 def ensure_north_to_south(
@@ -159,7 +245,8 @@ def resample_uv(
     ny: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Bilinear sample of a regular lat/lon u/v field onto nx×ny (rows north→south)."""
-    lons, u, v = sort_lon_columns(src_lons, src_u, src_v)
+    u, v, src_lons, src_lats = orient_uv_lat_lon(src_u, src_v, src_lons, src_lats)
+    lons, u, v = sort_lon_columns(src_lons, u, v)
     lats, u, v = ensure_north_to_south(np.asarray(src_lats, dtype=float), u, v)
     dest_lons = np.linspace(bbox["west"], bbox["east"], nx)
     dest_lats = np.linspace(bbox["north"], bbox["south"], ny)
@@ -413,17 +500,212 @@ def _decode_nc_uv(raw: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.nd
             raise RuntimeError("no lat/lon in netcdf")
         lats = np.asarray(ds[lat_name].values, dtype=float).reshape(-1)
         lons = np.asarray(ds[lon_name].values, dtype=float).reshape(-1)
+        remaining = tuple(str(d) for d in u.dims)
         uu = np.asarray(u.values, dtype=float)
         vv = np.asarray(v.values, dtype=float)
-        while uu.ndim > 2:
-            uu = uu[0]
-            vv = vv[0]
+        uu, vv, lons, lats = orient_uv_lat_lon(uu, vv, lons, lats, remaining)
         uu = np.where(np.isfinite(uu) & (np.abs(uu) < 5), uu, 0.0)
         vv = np.where(np.isfinite(vv) & (np.abs(vv) < 5), vv, 0.0)
-        meta = {"u": u_name, "v": v_name, "lat": lat_name, "lon": lon_name}
+        meta = {"u": u_name, "v": v_name, "lat": lat_name, "lon": lon_name, "dims": remaining}
         return uu, vv, lons, lats, meta
     finally:
         ds.close()
+
+
+class EarthdataBearer(httpx.Auth):
+    """URS bearer re-applied on every hop. Header-only auth is stripped on cross-host redirects."""
+
+    def __init__(self, token: str):
+        self._token = token
+
+    def auth_flow(self, request: httpx.Request):
+        request.headers["Authorization"] = f"Bearer {self._token}"
+        yield request
+
+
+def s3_to_https(url: str) -> str | None:
+    """Map a PO.DAAC/Earthdata s3:// object to the HTTPS archive URL. Never returns s3://."""
+    raw = (url or "").strip()
+    if not raw.startswith("s3://"):
+        return None
+    for src, dst in PODAAC_S3_HTTPS:
+        if raw.startswith(src):
+            mapped = dst + raw[len(src) :]
+            return mapped if urlparse(mapped).scheme in {"http", "https"} else None
+    rest = raw[5:]
+    bucket, _, key = rest.partition("/")
+    if not bucket or not key:
+        return None
+    if "podaac" in bucket or "cumulus" in bucket:
+        mapped = f"https://archive.podaac.earthdata.nasa.gov/{bucket}/{key}"
+        return mapped
+    return None
+
+
+def http_fetch_url(url: str) -> str | None:
+    """Return an http(s) URL httpx can fetch, mapping s3:// when possible. Never s3://."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("s3://"):
+        raw = s3_to_https(raw) or ""
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return raw
+
+
+def _is_opendap_granule(url: str) -> bool:
+    low = url.lower()
+    if "opendap.earthdata.nasa.gov" not in low:
+        return False
+    if "/collections/" not in low or "/granules/" not in low:
+        return False
+    if low.endswith((".html", ".htm")):
+        return False
+    granule = low.rstrip("/").rsplit("/granules/", 1)
+    return len(granule) == 2 and bool(granule[1])
+
+
+def _is_netcdf_data_link(url: str, rel: str = "", title: str = "") -> bool:
+    low = url.lower()
+    if any(
+        bad in low
+        for bad in (
+            ".md5",
+            "s3credentials",
+            "virtual-directory",
+            "search.earthdata.nasa.gov",
+            "github.com",
+            ".pdf",
+            "harmony.earthdata",
+            "citingpodaac",
+            "opendap.earthdata.nasa.gov",
+        )
+    ):
+        return False
+    if not (low.endswith(".nc") or low.endswith(".nc4")):
+        return False
+    rel_l = rel.lower()
+    title_l = title.lower()
+    if url.startswith("s3://") or "s3#" in rel_l:
+        return True
+    if "data#" in rel_l or "download" in title_l or low.endswith((".nc", ".nc4")):
+        return True
+    return False
+
+
+def parse_oscar_granule(entry: dict[str, Any]) -> dict[str, str]:
+    """Pick HTTPS (or s3→HTTPS) netCDF + OPeNDAP granule URLs from a CMR entry."""
+    https_nc: list[str] = []
+    s3_nc: list[str] = []
+    opendap: list[str] = []
+    for link in entry.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        url = str(link.get("href") or "").strip()
+        rel = str(link.get("rel") or "")
+        title = str(link.get("title") or "")
+        if not url:
+            continue
+        if _is_opendap_granule(url):
+            opendap.append(url.rstrip("/"))
+            continue
+        if not _is_netcdf_data_link(url, rel, title):
+            continue
+        if url.startswith("s3://"):
+            s3_nc.append(url)
+        else:
+            https_nc.append(url)
+    href = ""
+    for candidate in https_nc + s3_nc:
+        mapped = http_fetch_url(candidate)
+        if mapped:
+            href = mapped
+            break
+    title = str(entry.get("title") or "oscar")
+    start = str(entry.get("time_start") or "")[:10].replace("-", "")
+    stamp = start or title.replace("oscar_currents_nrt_", "").replace(".nc", "")
+    dap = opendap[0] if opendap else ""
+    cid = (settings.oscar_collection_id or "").strip()
+    if not dap and cid and title:
+        dap = f"https://opendap.earthdata.nasa.gov/collections/{cid}/granules/{title}"
+    return {
+        "href": href,
+        "opendap": dap,
+        "title": title,
+        "stamp": stamp,
+        "time": str(entry.get("time_start") or ""),
+    }
+
+
+def oscar_opendap_request_urls(base: str) -> list[str]:
+    """DAP2 netCDF URLs. OSCAR is u(time, longitude, latitude); last index is size-1."""
+    root = http_fetch_url((base or "").rstrip("/"))
+    if not root:
+        return []
+    lon = opendap_hyperslab(OSCAR_NLON, OSCAR_DAP_STRIDE)
+    lat = opendap_hyperslab(OSCAR_NLAT, OSCAR_DAP_STRIDE)
+    return [
+        f"{root}.nc?u[0][{lon}][{lat}],v[0][{lon}][{lat}]",
+        f"{root}.nc?u,v",
+    ]
+
+
+def coarsen_uv(
+    u: np.ndarray,
+    v: np.ndarray,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    step: int = OSCAR_DAP_STRIDE,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Downsample a dense native OSCAR grid. Indices are 0..size-1, never size or size+1."""
+    u, v, lons, lats = orient_uv_lat_lon(u, v, lons, lats)
+    if step <= 1 or u.ndim != 2:
+        return u, v, lons, lats
+    nlat, nlon = int(u.shape[0]), int(u.shape[1])
+    if nlat < 400 or nlon < 800:
+        return u, v, lons, lats
+    iy = stride_indices(nlat, step)
+    ix = stride_indices(nlon, step)
+    iy = iy[iy <= axis_last(lats.size)]
+    ix = ix[ix <= axis_last(lons.size)]
+    return u[np.ix_(iy, ix)], v[np.ix_(iy, ix)], lons[ix], lats[iy]
+
+
+def _looks_like_netcdf(raw: bytes) -> bool:
+    return len(raw) >= 8 and (raw.startswith(b"CDF") or raw.startswith(b"\x89HDF"))
+
+
+async def _oscar_auth() -> httpx.Auth | None:
+    token = await _earthdata_bearer()
+    if token:
+        return EarthdataBearer(token)
+    user, password = earthdata_user(), earthdata_password()
+    if user and password:
+        return httpx.BasicAuth(user, password)
+    return None
+
+
+async def _oscar_get_bytes(url: str, auth: httpx.Auth | None, *, label: str) -> bytes | None:
+    fetch_url = http_fetch_url(url)
+    if not fetch_url:
+        scheme = urlparse((url or "").strip()).scheme or "missing"
+        log.warning("oscar %s skipped unsupported protocol %r", label, scheme)
+        return None
+    client = await http()
+    try:
+        r = await client.get(fetch_url, auth=auth)
+    except httpx.UnsupportedProtocol as exc:
+        log.warning("oscar %s: unsupported protocol %s", label, exc)
+        return None
+    except Exception as exc:
+        log.warning("oscar %s: %s", label, exc)
+        return None
+    if r.status_code == 200 and _looks_like_netcdf(r.content):
+        return r.content
+    log.warning("oscar %s HTTP %s (%s bytes) %s", label, r.status_code, len(r.content), fetch_url)
+    return None
 
 
 async def _earthdata_bearer() -> str | None:
@@ -467,21 +749,13 @@ async def _cmr_latest_oscar() -> dict[str, str] | None:
     r.raise_for_status()
     entries = ((r.json() or {}).get("feed") or {}).get("entry") or []
     if not entries:
+        log.warning("oscar cmr: empty feed short_name=%s", settings.oscar_short_name)
         return None
-    entry = entries[0]
-    href = ""
-    opendap = ""
-    for link in entry.get("links") or []:
-        rel = str(link.get("rel") or "")
-        url = str(link.get("href") or "")
-        if url.endswith(".nc") and "protected" in url:
-            href = url
-        if "opendap.earthdata.nasa.gov/collections" in url and "granules" in url:
-            opendap = url.rstrip("/")
-    title = str(entry.get("title") or "oscar")
-    start = str(entry.get("time_start") or "")[:10].replace("-", "")
-    stamp = start or title.replace("oscar_currents_nrt_", "").replace(".nc", "")
-    return {"href": href, "opendap": opendap, "title": title, "stamp": stamp, "time": str(entry.get("time_start") or "")}
+    parsed = parse_oscar_granule(entries[0])
+    if not parsed.get("href") and not parsed.get("opendap"):
+        log.warning("oscar cmr: no https/opendap links title=%s", parsed.get("title"))
+        return None
+    return parsed
 
 
 async def fetch_oscar_daily() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]] | None:
@@ -501,35 +775,50 @@ async def fetch_oscar_daily() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.nd
         u, v, lons, lats, meta = cached
         meta = {**meta, "stamp": stamp, "cached": True, "source": "oscar-v2"}
         return u, v, lons, lats, meta
-    token = await _earthdata_bearer()
-    client = await http()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    auth = (earthdata_user(), earthdata_password()) if (earthdata_user() and earthdata_password()) else None
+    auth = await _oscar_auth()
+    if auth is None:
+        log.warning("oscar: Earthdata bearer/basic auth unavailable")
+        return None
     raw: bytes | None = None
-    # Prefer a strided OPeNDAP slice so we do not pull the full 0.25° cube every day.
-    if granule.get("opendap"):
-        ce = f"{granule['opendap']}.nc?u[0][0:4:719][0:4:1439],v[0][0:4:719][0:4:1439]"
-        try:
-            r = await client.get(ce, headers=headers, auth=auth)
-            if r.status_code == 200 and len(r.content) > 800:
-                raw = r.content
-        except Exception as exc:
-            log.warning("oscar opendap: %s", exc)
-    if raw is None and granule.get("href"):
-        try:
-            r = await client.get(granule["href"], headers=headers, auth=auth)
-            if r.status_code == 200 and len(r.content) > 800:
-                raw = r.content
-        except Exception as exc:
-            log.warning("oscar download: %s", exc)
+    via = ""
+    href = http_fetch_url(granule.get("href") or "")
+    log.info("oscar granule stamp=%s https=%s opendap=%s", stamp, href or "-", granule.get("opendap") or "-")
+    # Prefer PODAAC/Earthdata HTTPS netCDF, then resample onto the existing cache grid.
+    if href:
+        raw = await _oscar_get_bytes(href, auth, label="download")
+        if raw is not None:
+            via = "https"
+    elif granule.get("href"):
+        log.warning("oscar: granule href is not http(s) and could not be mapped")
     if raw is None:
+        for ce in oscar_opendap_request_urls(granule.get("opendap") or ""):
+            raw = await _oscar_get_bytes(ce, auth, label="opendap")
+            if raw is not None:
+                via = "opendap"
+                break
+    if raw is None:
+        log.warning(
+            "oscar empty stamp=%s https=%s opendap=%s",
+            stamp,
+            href or "-",
+            granule.get("opendap") or "-",
+        )
         return None
     try:
         u, v, lons, lats, meta = await asyncio.to_thread(_decode_nc_uv, raw)
+        u, v, lons, lats = coarsen_uv(u, v, lons, lats)
     except Exception as exc:
         log.warning("oscar decode: %s", exc)
         return None
-    meta.update({"stamp": stamp, "title": granule.get("title"), "time": granule.get("time"), "source": "oscar-v2"})
+    meta.update(
+        {
+            "stamp": stamp,
+            "title": granule.get("title"),
+            "time": granule.get("time"),
+            "source": "oscar-v2",
+            "fetch": via or "https",
+        }
+    )
     save_daily("oscar-v2", stamp, u, v, lons, lats, meta)
     return u, v, lons, lats, meta
 
@@ -662,6 +951,8 @@ async def fetch_current_grid(model: str = "best_match", nx: int | None = None, n
                 if source == "oscar":
                     daily = await fetch_oscar_daily()
                     if not daily:
+                        last_error = "oscar empty"
+                        log.warning("current source oscar: empty; trying next source")
                         continue
                     u, v, lons, lats, meta = daily
                     sx, sy = source_grid_size("oscar", nx, ny)
