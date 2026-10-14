@@ -212,7 +212,9 @@ ELEMENTS: list[dict[str, Any]] = [
 
 ELEMENT_BY_ID = {e["id"]: e for e in ELEMENTS}
 
-CHINA_BBOX = {"west": 73.0, "south": 18.0, "east": 135.0, "north": 54.0}
+# Full PRC frame including Taiwan and the South China Sea (南海诸岛).
+CHINA_BBOX = {"west": 73.0, "south": 3.0, "east": 135.0, "north": 54.0}
+CHINA_SEAS_BBOX = {"west": 105.0, "south": 3.0, "east": 132.0, "north": 41.0}
 GLOBAL_BBOX = {"west": -180.0, "south": -78.0, "east": 180.0, "north": 78.0}
 
 DEFAULT_POINT = {"name": "北京", "name_en": "Beijing", "lat": 39.9042, "lon": 116.4074}

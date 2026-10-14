@@ -60,7 +60,7 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
       }
       if (type === "fill" || type === "fill-extrusion") {
         if (src.includes("water") || src.includes("ocean") || src.includes("sea")) {
-          map.setPaintProperty(id, "fill-color", "#07111c")
+          map.setPaintProperty(id, "fill-color", "#071018")
           if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
         } else if (src.includes("building")) {
           map.setLayoutProperty(id, "visibility", "none")
@@ -68,7 +68,8 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
           map.setPaintProperty(id, "fill-color", "#1a2430")
           map.setPaintProperty(id, "fill-opacity", 0.85)
         } else if (src.includes("land")) {
-          map.setPaintProperty(id, "fill-color", "#151c27")
+          map.setPaintProperty(id, "fill-color", "#243140")
+          if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
         }
       }
       if (type === "line") {
@@ -83,12 +84,14 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
         ) {
           map.setLayoutProperty(id, "visibility", "none")
         } else if (src.includes("bound") || src.includes("admin") || src.includes("country")) {
-          map.setPaintProperty(id, "line-color", "#6d7c90")
-          map.setPaintProperty(id, "line-opacity", 0.28)
-          map.setPaintProperty(id, "line-width", 0.6)
-        } else if (src.includes("water")) {
-          map.setPaintProperty(id, "line-color", "#143047")
-          map.setPaintProperty(id, "line-opacity", 0.35)
+          map.setPaintProperty(id, "line-color", "#8a9bb0")
+          map.setPaintProperty(id, "line-opacity", 0.22)
+          map.setPaintProperty(id, "line-width", 0.55)
+        } else if (src.includes("water") || src.includes("coast")) {
+          map.setPaintProperty(id, "line-color", "#3d6a82")
+          map.setPaintProperty(id, "line-opacity", 0.7)
+          map.setPaintProperty(id, "line-width", 0.7)
+          map.setLayoutProperty(id, "visibility", "visible")
         } else {
           map.setLayoutProperty(id, "visibility", "none")
         }

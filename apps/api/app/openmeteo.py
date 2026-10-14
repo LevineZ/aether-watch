@@ -11,14 +11,23 @@ import httpx
 import numpy as np
 import redis.asyncio as redis
 
-from app.catalog import CHINA_BBOX, CURRENT_BY_ID, ELEMENT_BY_ID, PREVIEW_BY_ID
+from app.catalog import CHINA_BBOX, CHINA_SEAS_BBOX, CURRENT_BY_ID, ELEMENT_BY_ID, PREVIEW_BY_ID
 from app.config import settings
+from app.fieldmeta import field_clock
 from app.landmask import apply_ocean_mask, is_land
 
 USER_AGENT = "AetherWatch/0.1 (local observation; docker compose)"
 
 _http: httpx.AsyncClient | None = None
 _redis: redis.Redis | None = None
+_om_gate: asyncio.Semaphore | None = None
+
+
+def om_gate() -> asyncio.Semaphore:
+    global _om_gate
+    if _om_gate is None:
+        _om_gate = asyncio.Semaphore(max(1, settings.open_meteo_concurrency))
+    return _om_gate
 
 
 async def http() -> httpx.AsyncClient:
@@ -170,12 +179,11 @@ async def _gather_batches(
 ) -> list[dict[str, Any] | None]:
     """Fetch Open-Meteo multi-location chunks with a concurrency cap (rate-limit friendly)."""
     size = max(4, batch_size or settings.open_meteo_batch_size)
-    conc = max(1, settings.open_meteo_concurrency)
     chunks = [points[i : i + size] for i in range(0, len(points), size)]
-    sem = asyncio.Semaphore(conc)
+    gate = om_gate()
 
     async def one(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
-        async with sem:
+        async with gate:
             try:
                 return await fetch_chunk(chunk)
             except Exception:
@@ -186,6 +194,27 @@ async def _gather_batches(
     for g in groups:
         out.extend(g)
     return out
+
+
+async def _om_json(client: httpx.AsyncClient, url: str, params: dict[str, str]) -> Any:
+    """POST first (large multi-location bodies); GET fallback; light 429 backoff."""
+    last: Exception | None = None
+    for attempt in range(4):
+        try:
+            r = await client.post(url, data=params)
+            if r.status_code in (405, 411, 414, 415):
+                r = await client.get(url, params=params)
+            if r.status_code == 429:
+                await asyncio.sleep(1.2 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            last = exc
+            await asyncio.sleep(0.35 * (attempt + 1))
+    if last:
+        raise last
+    raise RuntimeError("open-meteo empty")
 
 
 def _grid_points(bbox: dict[str, float], nx: int, ny: int) -> tuple[list[float], list[float]]:
@@ -208,7 +237,7 @@ async def fetch_field(
     element = ELEMENT_BY_ID.get(variable, ELEMENT_BY_ID["temperature_2m"])
     om_var = element["om"]
     cache_key = (
-        f"field:{model}:{om_var}:{bbox['west']}:{bbox['south']}:{bbox['east']}:{bbox['north']}"
+        f"field:v3:{model}:{om_var}:{bbox['west']}:{bbox['south']}:{bbox['east']}:{bbox['north']}"
         f":{nx}x{ny}:{step}"
     )
     hit = await cache_get(cache_key)
@@ -221,6 +250,7 @@ async def fetch_field(
 
     client = await http()
     values = np.full((ny, nx), np.nan, dtype=float)
+    init_time: str | None = None
     valid_time: str | None = None
 
     async def batch(chunk: list[tuple[float, float]]) -> list[dict[str, Any] | None]:
@@ -236,9 +266,7 @@ async def fetch_field(
             "wind_speed_unit": "ms",
         }
         url = f"{settings.open_meteo_base.rstrip('/')}/v1/forecast"
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
+        data = await _om_json(client, url, params)
         # multi-location returns a list; single returns an object
         if isinstance(data, list):
             return data
@@ -260,7 +288,7 @@ async def fetch_field(
         si = min(max(step, 0), len(series) - 1)
         val = series[si]
         if times and valid_time is None:
-            valid_time = times[si]
+            init_time, valid_time = field_clock(times, step)
         row = idx // nx
         col = idx % nx
         if val is not None:
@@ -271,12 +299,17 @@ async def fetch_field(
     vmax = float(np.max(finite)) if finite.size else 1.0
     out = {
         "model": model,
+        "model_id": model,
         "variable": variable,
         "unit": element["unit"],
         "label": element["label"],
         "label_en": element["label_en"],
+        "init_time": init_time,
         "valid_time": valid_time,
+        "lead_hours": step,
         "step": step,
+        "kind": "model_forecast",
+        "provider": "open-meteo",
         "bbox": bbox,
         "lats": lats,
         "lons": lons,
@@ -284,6 +317,7 @@ async def fetch_field(
         "min": round(vmin, 3),
         "max": round(vmax, 3),
         "source": f"open-meteo:{model}",
+        "source_note": "near-real-time numerical model forecast, not station observations",
         "cached": False,
         "nx": nx,
         "ny": ny,
@@ -320,9 +354,7 @@ async def fetch_wind_grid(model: str = "gfs_seamless", nx: int = 24, ny: int = 1
             "wind_speed_unit": "ms",
         }
         url = f"{settings.open_meteo_base.rstrip('/')}/v1/forecast"
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
+        data = await _om_json(client, url, params)
         return data if isinstance(data, list) else [data]
 
     payloads = await _gather_batches(points, batch)
@@ -402,23 +434,53 @@ def _speed_unit_scale(unit: str | None) -> float:
     return 1.0
 
 
-async def fetch_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
-    """Surface ocean currents from Open-Meteo Marine (no API key)."""
-    bbox = {"west": -180.0, "south": -70.0, "east": 180.0, "north": 70.0}
-    nx = int(nx or settings.current_nx)
-    ny = int(ny or settings.current_ny)
-    marine_model = model if model in CURRENT_BY_ID else "best_match"
-    cache_key = f"currents:{marine_model}:{nx}x{ny}:oceanmask"
-    hit = await cache_get(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
+def _fill_ocean_gaps(u: np.ndarray, v: np.ndarray, bbox: dict[str, float]) -> None:
+    """Bilinear-ish fill for empty ocean cells so SCS/China seas are not holes."""
+    ny, nx = u.shape
+    lons = np.linspace(bbox["west"], bbox["east"], nx)
+    lats = np.linspace(bbox["north"], bbox["south"], ny)
+    ocean = np.zeros((ny, nx), dtype=bool)
+    for j in range(ny):
+        for i in range(nx):
+            ocean[j, i] = not is_land(float(lons[i]), float(lats[j]))
+    for _ in range(4):
+        nu, nv = u.copy(), v.copy()
+        changed = False
+        for j in range(ny):
+            for i in range(nx):
+                if not ocean[j, i]:
+                    continue
+                if abs(u[j, i]) + abs(v[j, i]) > 1e-6:
+                    continue
+                acc_u = acc_v = 0.0
+                n = 0
+                for dj, di in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    y, x = j + dj, i + di
+                    if 0 <= y < ny and 0 <= x < nx and ocean[y, x] and abs(u[y, x]) + abs(v[y, x]) > 1e-6:
+                        acc_u += u[y, x]
+                        acc_v += v[y, x]
+                        n += 1
+                if n:
+                    nu[j, i] = acc_u / n
+                    nv[j, i] = acc_v / n
+                    changed = True
+        u[:] = nu
+        v[:] = nv
+        if not changed:
+            break
 
+
+async def _fetch_current_patch(
+    marine_model: str,
+    bbox: dict[str, float],
+    nx: int,
+    ny: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
     lats, lons = _grid_points(bbox, nx, ny)
     points = [(lat, lon) for lat in reversed(lats) for lon in lons]
-    client = await http()
     u = np.zeros((ny, nx), dtype=float)
     v = np.zeros((ny, nx), dtype=float)
+    client = await http()
     marine = settings.open_meteo_marine_base.rstrip("/")
     ocean_idx = [(i, lat, lon) for i, (lat, lon) in enumerate(points) if not is_land(lon, lat)]
     ocean_pts = [(lat, lon) for _, lat, lon in ocean_idx]
@@ -436,26 +498,21 @@ async def fetch_current_grid(model: str = "best_match", nx: int | None = None, n
             "wind_speed_unit": "ms",
             "cell_selection": "sea",
         }
-        url = f"{marine}/v1/marine"
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
+        data = await _om_json(client, f"{marine}/v1/marine", params)
         return data if isinstance(data, list) else [data]
 
     payloads = await _gather_batches(ocean_pts, batch)
-
     filled = 0
     for (idx, req_lat, req_lon), payload in zip(ocean_idx, payloads, strict=False):
         if not payload:
             continue
-        # cell_selection=sea snaps land queries onto nearby ocean; drop those.
         act_lat = payload.get("latitude")
         act_lon = payload.get("longitude")
         if act_lat is not None and act_lon is not None:
             dlat = float(act_lat) - req_lat
             dlon = ((float(act_lon) - req_lon + 180.0) % 360.0) - 180.0
             dist = math.hypot(dlat, dlon * math.cos(math.radians(req_lat)))
-            if dist > 1.15:
+            if dist > 1.35:
                 continue
         hourly = payload.get("hourly") or {}
         units = payload.get("hourly_units") or {}
@@ -468,23 +525,57 @@ async def fetch_current_grid(model: str = "best_match", nx: int | None = None, n
         scale = _speed_unit_scale(str(units.get(spd_key) or "m/s"))
         speed = float(spd) * scale
         rad = math.radians(float(cdir))
-        # oceanographic direction: TOWARDS which the current flows
-        uu = speed * math.sin(rad)
-        vv = speed * math.cos(rad)
         row = idx // nx
         col = idx % nx
-        u[row, col] = uu
-        v[row, col] = vv
+        u[row, col] = speed * math.sin(rad)
+        v[row, col] = speed * math.cos(rad)
         filled += 1
+    _fill_ocean_gaps(u, v, bbox)
+    return u, v, filled
 
+
+async def fetch_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
+    """Surface ocean currents from Open-Meteo Marine, plus a China-seas nest."""
+    bbox = {"west": -180.0, "south": -70.0, "east": 180.0, "north": 70.0}
+    nx = int(nx or settings.current_nx)
+    ny = int(ny or settings.current_ny)
+    marine_model = model if model in CURRENT_BY_ID else "best_match"
+    cache_key = f"currents:v2:{marine_model}:{nx}x{ny}:nest"
+    hit = await cache_get(cache_key)
+    if hit:
+        hit["cached"] = True
+        return hit
+
+    u, v, filled = await _fetch_current_patch(marine_model, bbox, nx, ny)
     if filled < 8:
         return synthetic_currents(nx, ny, bbox, reason="open-meteo-marine-sparse")
 
     out = apply_ocean_mask(
-        _vector_payload(
-            nx, ny, bbox, u, v, f"open-meteo-marine:{marine_model}", filled, kind="currents"
-        )
+        _vector_payload(nx, ny, bbox, u, v, f"open-meteo-marine:{marine_model}", filled, kind="currents")
     )
+    try:
+        nest_u, nest_v, nest_filled = await _fetch_current_patch(
+            marine_model,
+            CHINA_SEAS_BBOX,
+            settings.current_nest_nx,
+            settings.current_nest_ny,
+        )
+        if nest_filled >= 6:
+            nest = apply_ocean_mask(
+                _vector_payload(
+                    settings.current_nest_nx,
+                    settings.current_nest_ny,
+                    CHINA_SEAS_BBOX,
+                    nest_u,
+                    nest_v,
+                    f"open-meteo-marine:{marine_model}:china-seas",
+                    nest_filled,
+                    kind="currents",
+                )
+            )
+            out["nest"] = nest
+    except Exception:
+        pass
     await cache_set(cache_key, out, settings.current_cache_ttl_seconds)
     return out
 

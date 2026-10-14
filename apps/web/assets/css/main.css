@@ -331,6 +331,11 @@ img { max-width: 100%; }
   font-size: 0.72rem;
 }
 .tax-hint { color: var(--ink-faint); }
+.tax-init {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
 .play {
   margin-left: auto;
   border-radius: 999px;

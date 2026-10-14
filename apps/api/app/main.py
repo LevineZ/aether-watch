@@ -198,8 +198,8 @@ async def field(
     east: float | None = None,
     north: float | None = None,
     step: int = 0,
-    nx: int | None = Query(None, ge=4, le=48),
-    ny: int | None = Query(None, ge=4, le=36),
+    nx: int | None = Query(None, ge=4, le=96),
+    ny: int | None = Query(None, ge=4, le=72),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     bbox = {
@@ -258,7 +258,7 @@ async def wind(model: str = Query("gfs_seamless")) -> dict[str, Any]:
     if model not in PREVIEW_BY_ID:
         model = "gfs_seamless"
     try:
-        return await openmeteo.fetch_wind_grid(model, nx=20, ny=10)
+        return await openmeteo.fetch_wind_grid(model, nx=36, ny=18)
     except Exception as exc:
         log.warning("wind live fetch failed: %s", exc)
         return openmeteo.synthetic_wind(20, 10, {"west": -180, "south": -70, "east": 180, "north": 70})
@@ -329,6 +329,16 @@ async def feeds(session: AsyncSession = Depends(get_session), limit: int = 40) -
             }
         ]
     return {"events": events}
+
+
+@app.get("/api/geo/china-prc.json")
+async def china_prc() -> dict[str, Any]:
+    from pathlib import Path
+
+    path = Path(settings.geo_dir) / "china-prc.geojson"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    raise HTTPException(404, "china-prc geojson missing")
 
 
 @app.get("/api/geo/china-bounds.json")

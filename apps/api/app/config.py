@@ -20,13 +20,15 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 1800
     wind_cache_ttl_seconds: int = 3600
     current_cache_ttl_seconds: int = 3600
-    # China preview field sampling (Open-Meteo locations). 40×30 ≈ 1.5° over CHINA_BBOX.
-    field_nx: int = 40
-    field_ny: int = 30
-    current_nx: int = 24
-    current_ny: int = 12
-    open_meteo_batch_size: int = 40
-    open_meteo_concurrency: int = 3
+    # China preview field sampling (Open-Meteo locations). 64×48 ≈ 1° over the full PRC frame.
+    field_nx: int = 64
+    field_ny: int = 48
+    current_nx: int = 36
+    current_ny: int = 18
+    current_nest_nx: int = 36
+    current_nest_ny: int = 28
+    open_meteo_batch_size: int = 200
+    open_meteo_concurrency: int = 4
 
 
 settings = Settings()

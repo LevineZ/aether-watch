@@ -9,7 +9,27 @@ function bitAt(i: number) {
   return (PACKED[i >> 3] >> (7 - (i & 7))) & 1
 }
 
+/** Open-water basins the 0.5° Natural Earth mask often paints as land (islands / coast bleed). */
+export function isForcedOcean(lon: number, lat: number): boolean {
+  if (108.15 <= lon && lon <= 120.9 && 3.6 <= lat && lat <= 19.6) {
+    if (lon < 109.25 && lat < 16.6) return false
+    if (lon > 119.6 && lat < 8.2) return false
+    return true
+  }
+  if (117.7 <= lon && lon <= 121.3 && 22.1 <= lat && lat <= 26.9) return true
+  if (121.0 <= lon && lon <= 128.6 && 24.4 <= lat && lat <= 33.3) {
+    if (lon < 122.15 && lat > 30.6) return false
+    return true
+  }
+  if (119.4 <= lon && lon <= 126.6 && 33.0 <= lat && lat <= 39.3) {
+    if (lon < 121.4 && lat > 36.6) return false
+    return true
+  }
+  return false
+}
+
 export function isLand(lon: number, lat: number): boolean {
+  if (isForcedOcean(lon, lat)) return false
   if (lat > 89.5 || lat < -85) return lat < -85
   let x = Math.floor(((lon + 180) / 360) * NX)
   x = ((x % NX) + NX) % NX
@@ -44,4 +64,13 @@ export function randomOceanPoint(): [number, number] {
   const lon = -180 + (x + Math.random()) * (360 / NX)
   const lat = 90 - (y + Math.random()) * (180 / NY)
   return [lon > 180 ? lon - 360 : lon, Math.max(-78, Math.min(78, lat))]
+}
+
+export function randomOceanPointIn(west: number, south: number, east: number, north: number): [number, number] {
+  for (let t = 0; t < 28; t++) {
+    const lon = west + Math.random() * (east - west)
+    const lat = south + Math.random() * (north - south)
+    if (isOcean(lon, lat)) return [lon, lat]
+  }
+  return randomOceanPoint()
 }

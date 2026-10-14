@@ -14,13 +14,13 @@ export type GeoBbox = {
 
 /** Default China frame used by every linked forecast map. */
 export const CHINA_CAMERA: MapCamera = {
-  center: [104.0, 35.6],
-  zoom: 3.15,
+  center: [105.0, 28.0],
+  zoom: 2.55,
   bearing: 0,
   pitch: 0,
 }
 
-export const CHINA_BBOX: GeoBbox = { west: 73, south: 18, east: 135, north: 54 }
+export const CHINA_BBOX: GeoBbox = { west: 73, south: 3, east: 135, north: 54 }
 
 export const LEAD_HOURS = [0, 6, 12, 18, 24, 36, 48, 60, 72, 96, 120] as const
 
@@ -35,13 +35,26 @@ export function camerasClose(a: MapCamera, b: MapCamera) {
 }
 
 export function clampZoom(z: number) {
-  return Math.min(8.2, Math.max(2.15, z))
+  return Math.min(8.2, Math.max(1.85, z))
+}
+
+export function parseOmTime(iso?: string | null) {
+  if (!iso) return null
+  const raw = String(iso)
+  const d = /Z|[+-]\d\d:\d\d$/.test(raw) ? new Date(raw) : new Date(`${raw}Z`)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+export function addHoursIso(iso: string, hours: number) {
+  const d = parseOmTime(iso)
+  if (!d) return iso
+  return new Date(d.getTime() + hours * 3600_000).toISOString()
 }
 
 export function beijingShort(iso?: string | null) {
   if (!iso) return "—"
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return String(iso).replace("T", " ").slice(5, 16)
+  const d = parseOmTime(iso)
+  if (!d) return String(iso).replace("T", " ").slice(5, 16)
   const fmt = new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",
     month: "2-digit",

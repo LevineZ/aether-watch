@@ -44,8 +44,9 @@
       <div class="tax">
         <div class="tax-top">
           <span>{{ t("forecast.lead") }}</span>
-          <strong class="tax-now">{{ validStamp }}</strong>
-          <span class="tax-hint">{{ t("forecast.bjtRange") }}</span>
+          <strong class="tax-now">{{ t("forecast.valid") }} {{ validStamp }}</strong>
+          <span class="tax-init">{{ t("forecast.init") }} {{ initStamp }}</span>
+          <span class="tax-hint">{{ t("forecast.kindNote") }} · +{{ lead }}h · {{ t("forecast.bjtRange") }}</span>
           <button class="play" type="button" :aria-pressed="playing" @click="togglePlay">
             {{ playing ? t("forecast.pause") : t("forecast.play") }}
           </button>
@@ -66,6 +67,7 @@
       <div class="map-grid" :class="{ solo: mapsToShow.length === 1 }">
         <ClientOnly v-for="id in mapsToShow" :key="id">
           <FieldMap
+            :key="id"
             :map-id="id"
             :title="labelOf(id)"
             :field="(fields[id] as never) || null"
@@ -75,6 +77,10 @@
             :camera="camera"
             :driver-id="cameraDriver"
             :pick="{ lat, lon }"
+            :init-time="initIso"
+            :valid-time="validIsoOf(id)"
+            :model-id="id"
+            :lead-hours="lead"
             @camera="onCamera(id, $event)"
             @camera-end="onCameraEnd(id)"
             @pick="onPick"
@@ -115,11 +121,13 @@ import {
   CHINA_BBOX,
   CHINA_CAMERA,
   LEAD_HOURS,
+  addHoursIso,
   beijingShort,
   clampZoom,
   type GeoBbox,
   type MapCamera,
 } from "~/composables/useLinkedCamera"
+import type { ScalarField } from "~/utils/rasterField"
 
 const { t, locale } = useI18n()
 useHead({ title: computed(() => `${t("forecast.title")} · AetherWatch`) })
@@ -137,7 +145,9 @@ const lat = ref(39.9)
 const lon = ref(116.4)
 const latText = ref("39.90")
 const lonText = ref("116.40")
-const fields = ref<Record<string, unknown>>({})
+const fields = ref<Record<string, ScalarField>>({})
+let fieldGen = 0
+const fieldCache = new Map<string, ScalarField>()
 const fieldError = ref("")
 const fieldLoading = ref(false)
 const seriesLoading = ref(false)
@@ -172,10 +182,22 @@ function elLabel(el?: Element | null) {
   if (!el) return ""
   return locale.value === "en" ? el.label_en || el.label : el.label
 }
-const validStamp = computed(() => {
-  const first = mapsToShow.value.map((id) => fields.value[id] as { valid_time?: string } | undefined).find((f) => f?.valid_time)
-  return first?.valid_time ? beijingShort(first.valid_time) : `+${lead.value}h`
+const initIso = computed(() => {
+  for (const id of mapsToShow.value) {
+    const f = fields.value[id]
+    if (f?.init_time) return f.init_time
+  }
+  return null
 })
+const validStamp = computed(() => beijingShort(validIsoOf(mapsToShow.value[0] || "")))
+const initStamp = computed(() => beijingShort(initIso.value))
+
+function validIsoOf(id: string) {
+  const f = fields.value[id]
+  if (f?.valid_time) return f.valid_time
+  if (initIso.value) return addHoursIso(initIso.value, lead.value)
+  return null
+}
 
 function labelOf(id: string) {
   return modelOptions.value.find((m) => m.id === id)?.short || id
@@ -187,7 +209,7 @@ function toggle(id: string) {
   if (selected.value.includes(id)) {
     if (selected.value.length > 1) selected.value = selected.value.filter((x) => x !== id)
   } else {
-    selected.value = [...selected.value, id].slice(0, 4)
+    selected.value = [...selected.value.filter((x) => x !== id), id].slice(-4)
   }
 }
 function selectPreview() {
@@ -308,15 +330,27 @@ async function loadSeries() {
   }
 }
 
+function fieldKey(id: string, bbox: GeoBbox) {
+  return `${id}|${variable.value}|${lead.value}|${bbox.west}|${bbox.south}|${bbox.east}|${bbox.north}`
+}
+
 async function loadFields() {
   fieldError.value = ""
   fieldLoading.value = true
-  const next: Record<string, unknown> = { ...fields.value }
+  const gen = ++fieldGen
   const bbox = viewBbox.value || CHINA_BBOX
+  const ids = mapsToShow.value
+  const kept: Record<string, ScalarField> = {}
+  for (const id of ids) {
+    if (fields.value[id]) kept[id] = fields.value[id]
+  }
+  fields.value = kept
   await Promise.all(
-    mapsToShow.value.map(async (id) => {
+    ids.map(async (id) => {
+      const key = fieldKey(id, bbox)
+      const cached = fieldCache.get(key)
       try {
-        next[id] = await $fetch(resolveApi("/api/field"), {
+        const data = cached || await $fetch<ScalarField>(resolveApi("/api/field"), {
           query: {
             model: id,
             variable: variable.value,
@@ -327,13 +361,19 @@ async function loadFields() {
             north: bbox.north,
           },
         })
+        if (!cached) {
+          fieldCache.set(key, data)
+          if (fieldCache.size > 48) fieldCache.delete(fieldCache.keys().next().value as string)
+        }
+        if (gen !== fieldGen) return
+        fields.value = { ...fields.value, [id]: data }
       } catch (e: unknown) {
+        if (gen !== fieldGen) return
         fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
       }
     }),
   )
-  fields.value = next
-  fieldLoading.value = false
+  if (gen === fieldGen) fieldLoading.value = false
 }
 
 let seriesTimer: ReturnType<typeof setTimeout> | null = null
@@ -347,7 +387,7 @@ onMounted(async () => {
   await Promise.all([loadSeries(), loadFields()])
 })
 onBeforeUnmount(stopPlay)
-watch([variable, selected], () => {
+watch([variable, () => selected.value.join(",")], () => {
   debounceSeries()
   loadFields()
 })
