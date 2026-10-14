@@ -258,10 +258,10 @@ export class WindParticleLayer implements CustomLayerInterface {
     if (this.kind === "current") {
       ;[lon, lat] = randomCurrentPoint()
       if (this.grid) {
-        for (let t = 0; t < 16; t++) {
+        for (let t = 0; t < 8; t++) {
           ;[lon, lat] = randomCurrentPoint()
           const [u, v] = sampleWind(this.grid, lon, lat, true)
-          if (Math.hypot(u, v) > 0.012 && isOcean(lon, lat)) break
+          if (Math.hypot(u, v) > 0.008 && isOcean(lon, lat)) break
         }
       }
     }

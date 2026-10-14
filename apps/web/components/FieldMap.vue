@@ -49,7 +49,7 @@ import {
   type MapCamera,
 } from "~/composables/useLinkedCamera"
 import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_POSITRON } from "~/utils/mapLabels"
-import { applyChinaBorders } from "~/utils/chinaBorders"
+import { applyChinaBorders, firstPrcLayerId, raiseChinaBorders } from "~/utils/chinaBorders"
 import { signalPalette } from "~/utils/fieldLayer"
 
 const props = withDefaults(
@@ -131,10 +131,10 @@ function paint() {
   const url = rasterizeField(
     props.field,
     props.palette || "thermal",
-    Math.min(1600, Math.max(768, nx * 22)),
-    Math.min(1200, Math.max(576, ny * 22)),
+    Math.min(2048, Math.max(960, nx * 32)),
+    Math.min(1536, Math.max(720, ny * 32)),
     "bicubic",
-    { signalAlpha: signalPalette(props.palette || "thermal"), opacity: 200 },
+    { signalAlpha: signalPalette(props.palette || "thermal"), opacity: 188, prefilter: true },
   )
   const coordinates = fieldCorners(props.field)
   const src = map.getSource("field") as maplibregl.ImageSource | undefined
@@ -142,16 +142,14 @@ function paint() {
     src.updateImage({ url, coordinates })
   } else if (map.isStyleLoaded()) {
     map.addSource("field", { type: "image", url, coordinates })
-    const before = map.getLayer("prc-land-line")
-      ? "prc-land-line"
-      : map.getStyle()?.layers?.find((l) => l.type === "symbol")?.id
+    const before = firstPrcLayerId(map) || map.getStyle()?.layers?.find((l) => l.type === "symbol")?.id
     map.addLayer(
       {
         id: "field",
         type: "raster",
         source: "field",
         paint: {
-          "raster-opacity": 0.78,
+          "raster-opacity": 0.7,
           "raster-fade-duration": 0,
           "raster-resampling": "linear",
         },
@@ -159,6 +157,7 @@ function paint() {
       before,
     )
   }
+  raiseChinaBorders(map)
 }
 
 function placeMarker() {
@@ -222,7 +221,10 @@ onMounted(async () => {
     applyPlaceLabels(map!, locale.value)
     applyCamera(props.camera)
     paint()
-    applyChinaBorders(map!, "paper")
+    void applyChinaBorders(map!, "paper").then(() => {
+      paint()
+      raiseChinaBorders(map!)
+    })
     placeMarker()
     map?.resize()
   })

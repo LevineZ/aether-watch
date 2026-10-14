@@ -1,4 +1,4 @@
-import { isOcean, randomOceanPoint, randomOceanPointIn } from "./landmask"
+import { isOcean, randomOceanPoint } from "./landmask"
 
 export type Wind = {
   width: number
@@ -109,11 +109,11 @@ export function mercatorY(lat: number) {
 }
 
 export function targetParticleCount(width: number, dpr: number, kind: "wind" | "current" = "wind") {
-  const bias = kind === "current" ? 1.2 : 1
-  if (width < 720) return Math.round(11000 * bias)
-  if (width < 1100) return Math.round(18000 * bias)
-  if (dpr > 1.6) return Math.round(24000 * bias)
-  return Math.round(28000 * bias)
+  const bias = kind === "current" ? 1.45 : 1
+  if (width < 720) return Math.round(14000 * bias)
+  if (width < 1100) return Math.round(22000 * bias)
+  if (dpr > 1.6) return Math.round(30000 * bias)
+  return Math.round(34000 * bias)
 }
 
 export function wrapLon(lon: number) {
@@ -122,10 +122,38 @@ export function wrapLon(lon: number) {
   return lon
 }
 
-/** Bias current seeds into SCS / China seas so the default globe is not empty there. */
+/** Ocean basins for current seeds. Weights are global-first; China seas are a modest nest, not SCS-only. */
+export const CURRENT_BASINS: { name: string; weight: number; west: number; south: number; east: number; north: number }[] = [
+  { name: "n-pacific", weight: 0.2, west: 128, south: 0, east: 240, north: 52 },
+  { name: "s-pacific", weight: 0.14, west: 150, south: -52, east: 290, north: 0 },
+  { name: "n-atlantic", weight: 0.16, west: -80, south: 0, east: 8, north: 64 },
+  { name: "s-atlantic", weight: 0.1, west: -70, south: -52, east: 18, north: 0 },
+  { name: "indian", weight: 0.12, west: 38, south: -48, east: 108, north: 24 },
+  { name: "southern", weight: 0.14, west: -180, south: -70, east: 180, north: -42 },
+  { name: "arctic", weight: 0.04, west: -180, south: 68, east: 180, north: 80 },
+  { name: "china-seas", weight: 0.08, west: 105, south: 3, east: 132, north: 41 },
+  { name: "scs", weight: 0.02, west: 105.2, south: 3.4, east: 121, north: 23.2 },
+]
+
+const BASIN_WEIGHT_SUM = CURRENT_BASINS.reduce((s, b) => s + b.weight, 0)
+
+export function randomOceanPointWrapped(west: number, south: number, east: number, north: number): [number, number] {
+  const span = east - west
+  for (let t = 0; t < 28; t++) {
+    const lon = wrapLon(west + Math.random() * span)
+    const lat = south + Math.random() * (north - south)
+    if (isOcean(lon, lat)) return [lon, lat]
+  }
+  return randomOceanPoint()
+}
+
+/** Distributed current seeds: global oceans first, light China-seas nest, no SCS-only pile-up. */
 export function randomCurrentPoint(): [number, number] {
-  const r = Math.random()
-  if (r < 0.3) return randomOceanPointIn(105.2, 3.4, 121.0, 23.2)
-  if (r < 0.44) return randomOceanPointIn(118.0, 22.0, 131.0, 41.0)
+  const r = Math.random() * BASIN_WEIGHT_SUM
+  let acc = 0
+  for (const basin of CURRENT_BASINS) {
+    acc += basin.weight
+    if (r <= acc) return randomOceanPointWrapped(basin.west, basin.south, basin.east, basin.north)
+  }
   return randomOceanPoint()
 }

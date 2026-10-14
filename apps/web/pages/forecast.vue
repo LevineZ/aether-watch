@@ -345,34 +345,32 @@ async function loadFields() {
     if (fields.value[id]) kept[id] = fields.value[id]
   }
   fields.value = kept
-  await Promise.all(
-    ids.map(async (id) => {
-      const key = fieldKey(id, bbox)
-      const cached = fieldCache.get(key)
-      try {
-        const data = cached || await $fetch<ScalarField>(resolveApi("/api/field"), {
-          query: {
-            model: id,
-            variable: variable.value,
-            step: lead.value,
-            west: bbox.west,
-            south: bbox.south,
-            east: bbox.east,
-            north: bbox.north,
-          },
-        })
-        if (!cached) {
-          fieldCache.set(key, data)
-          if (fieldCache.size > 48) fieldCache.delete(fieldCache.keys().next().value as string)
-        }
-        if (gen !== fieldGen) return
-        fields.value = { ...fields.value, [id]: data }
-      } catch (e: unknown) {
-        if (gen !== fieldGen) return
-        fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
+  for (const id of ids) {
+    const key = fieldKey(id, bbox)
+    const cached = fieldCache.get(key)
+    try {
+      const data = cached || await $fetch<ScalarField>(resolveApi("/api/field"), {
+        query: {
+          model: id,
+          variable: variable.value,
+          step: lead.value,
+          west: bbox.west,
+          south: bbox.south,
+          east: bbox.east,
+          north: bbox.north,
+        },
+      })
+      if (!cached) {
+        fieldCache.set(key, data)
+        if (fieldCache.size > 48) fieldCache.delete(fieldCache.keys().next().value as string)
       }
-    }),
-  )
+      if (gen !== fieldGen) return
+      fields.value = { ...fields.value, [id]: data }
+    } catch (e: unknown) {
+      if (gen !== fieldGen) return
+      fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
+    }
+  }
   if (gen === fieldGen) fieldLoading.value = false
 }
 

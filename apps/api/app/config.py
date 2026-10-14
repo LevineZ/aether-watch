@@ -27,8 +27,15 @@ class Settings(BaseSettings):
     current_ny: int = 18
     current_nest_nx: int = 36
     current_nest_ny: int = 28
-    open_meteo_batch_size: int = 200
-    open_meteo_concurrency: int = 4
+    # Conservative Open-Meteo pacing. The free API 429s if we batch large
+    # multi-location bodies in parallel — keep concurrency=1 and leave gaps.
+    open_meteo_batch_size: int = 48
+    open_meteo_concurrency: int = 1
+    open_meteo_min_interval_seconds: float = 0.75
+    open_meteo_max_retries: int = 6
+    open_meteo_backoff_base: float = 2.0
+    open_meteo_backoff_cap_seconds: float = 45.0
+    open_meteo_stale_ttl_seconds: int = 14400
 
 
 settings = Settings()
