@@ -779,8 +779,8 @@ async def prewarm_hot_paths() -> dict[str, Any]:
         summary["errors"]["currents"] = str(exc)
         log.warning("prewarm currents: %s", exc)
     try:
-        await fetch_wind_grid("gfs_seamless", nx=20, ny=10)
-        summary["ok"].append("wind:20x10")
+        await fetch_wind_grid("gfs_seamless", nx=settings.wind_nx, ny=settings.wind_ny)
+        summary["ok"].append(f"wind:{settings.wind_nx}x{settings.wind_ny}")
     except Exception as exc:
         summary["errors"]["wind"] = str(exc)
         log.warning("prewarm wind: %s", exc)

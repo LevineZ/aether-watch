@@ -61,6 +61,7 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertIn("dash", kinds)
         dash = next(f for f in data["features"] if (f.get("properties") or {}).get("kind") == "dash")
         self.assertEqual(dash["geometry"]["type"], "MultiLineString")
+        self.assertGreaterEqual(len(dash["geometry"]["coordinates"]), 8)
         land = next(f for f in data["features"] if (f.get("properties") or {}).get("kind") == "land")
         self.assertEqual(land["geometry"]["type"], "MultiPolygon")
 
@@ -74,6 +75,33 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertLessEqual(settings.field_ny, 24)
         self.assertLessEqual(settings.current_nx, 24)
         self.assertLessEqual(settings.current_ny, 12)
+        self.assertLessEqual(settings.wind_nx, 24)
+        self.assertLessEqual(settings.wind_ny, 12)
+
+    def test_borders_are_solid_guanchao_not_css_dash(self):
+        text = (REPO / "apps" / "web" / "utils" / "chinaBorders.ts").read_text(encoding="utf-8")
+        self.assertIn("rgba(255,186,92,0.95)", text)
+        self.assertIn("PAPER_NATION", text)
+        self.assertNotRegex(text, r"dasharray:\s*\[\s*2")
+        self.assertIn("line-cap", text)
+        self.assertIn('"butt"', text)
+
+    def test_live_wind_uses_env_grid_not_36x18(self):
+        text = (REPO / "apps" / "api" / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("settings.wind_nx", text)
+        self.assertNotIn("nx=36, ny=18", text)
+
+    def test_interp_helpers_bilinear(self):
+        import subprocess
+
+        script = REPO / "apps" / "web" / "utils" / "interp.test.ts"
+        result = subprocess.run(
+            ["node", "--experimental-strip-types", "--test", str(script)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_current_basins_are_global_not_scs_only(self):
         text = (REPO / "apps" / "web" / "utils" / "windField.ts").read_text(encoding="utf-8")
@@ -87,6 +115,10 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertGreater(weights["n-pacific"], weights["scs"])
         self.assertLess(weights["scs"] + weights["china-seas"], 0.2)
         self.assertGreater(weights["n-pacific"] + weights["s-pacific"] + weights["n-atlantic"], 0.4)
+        self.assertIn("VECTOR_UPSAMPLE", text)
+        layer = (REPO / "apps" / "web" / "utils" / "windLayer.ts").read_text(encoding="utf-8")
+        self.assertRegex(layer, r"const TRAIL = 2[0-9]")
+        self.assertIn("CURRENT_STEP = 0.016", layer)
 
 
 if __name__ == "__main__":

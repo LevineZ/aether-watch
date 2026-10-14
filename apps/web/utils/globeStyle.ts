@@ -1,4 +1,5 @@
 import type { Map as MlMap } from "maplibre-gl"
+import { classifyBoundaryLayer } from "~/utils/chinaBorders"
 import { applyPlaceLabels, isPlaceLabelLayer, type LabelLang } from "~/utils/mapLabels"
 
 /** Strip streets/POIs and darken water so the globe reads as space + ocean. */
@@ -83,8 +84,14 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
           src.includes("transport")
         ) {
           map.setLayoutProperty(id, "visibility", "none")
-        } else if (src.includes("bound") || src.includes("admin") || src.includes("country")) {
-          map.setLayoutProperty(id, "visibility", "none")
+        } else if (src.includes("bound") || src.includes("admin") || src.includes("country") || src.includes("disput")) {
+          const role = classifyBoundaryLayer(id, src)
+          if (role === "province") {
+            /* applyChinaBorders restyles these to solid 观潮 orange */
+            map.setLayoutProperty(id, "visibility", "visible")
+          } else {
+            map.setLayoutProperty(id, "visibility", "none")
+          }
         } else if (src.includes("water") || src.includes("coast")) {
           map.setPaintProperty(id, "line-color", "#4a86a0")
           map.setPaintProperty(id, "line-opacity", 0.82)

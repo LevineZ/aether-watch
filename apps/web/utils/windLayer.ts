@@ -27,13 +27,13 @@ type RenderArgs = {
   modelViewProjectionMatrix?: Float32Array | number[]
 }
 
-const TRAIL = 10
+const TRAIL = 22
 const STRIDE = 4
-const MAX_PARTICLES = 36000
+const MAX_PARTICLES = 50000
 const VERTS_PER_PARTICLE = (TRAIL - 1) * 2
-/** Degrees per 16.67ms at 1 m/s. Currents must stay calm vs wind. */
-const CURRENT_STEP = 0.038
-const WIND_STEP = 0.034
+/** Degrees per 16.67ms at 1 m/s. Slower than before so long trails read as ribbons. */
+const CURRENT_STEP = 0.016
+const WIND_STEP = 0.022
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
   const sh = gl.createShader(type)
@@ -236,7 +236,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   private baseCount(width: number, dpr: number) {
-    if (this.reduced) return this.kind === "current" ? 4000 : 3200
+    if (this.reduced) return this.kind === "current" ? 5200 : 4000
     return Math.min(MAX_PARTICLES, targetParticleCount(width, dpr, this.kind))
   }
 
@@ -311,7 +311,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     const camLat = cam?.lat ?? 0
     const sinCam = Math.sin(camLat * (Math.PI / 180))
     const cosCam = Math.cos(camLat * (Math.PI / 180))
-    const maxAge = interacting ? 80 : current ? 280 : 120
+    const maxAge = interacting ? 90 : current ? 420 : 160
     let w = 0
     const verts = this.verts
     const minCos = 0.02
@@ -354,8 +354,8 @@ export class WindParticleLayer implements CustomLayerInterface {
         const x1 = this.histX[o + k + 1]
         const y1 = this.histY[o + k + 1]
         if (Math.abs(x1 - x0) > 0.45) continue
-        const a0 = ((k - start + 1) / (segs + 1)) * 0.55
-        const a1 = ((k - start + 2) / (segs + 1)) * 0.95
+        const a0 = ((k - start + 1) / (segs + 1)) * 0.62
+        const a1 = ((k - start + 2) / (segs + 1)) * 1.0
         let p = w * STRIDE
         verts[p++] = x0
         verts[p++] = y0
