@@ -35,7 +35,7 @@ from app.workers import NcIngestActor, broker
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("aetherwatch")
 
-CATALOG_CACHE_KEY = "catalog:v1"
+CATALOG_CACHE_KEY = "catalog:v2"
 
 
 async def _prewarm_idle() -> None:
@@ -90,6 +90,12 @@ async def lifespan(_: FastAPI):
     except Exception:
         pass
     await openmeteo.close()
+    try:
+        from app.currents import close as close_currents
+
+        await close_currents()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -308,7 +314,9 @@ async def currents(
     if model not in CURRENT_BY_ID:
         model = "best_match"
     try:
-        return await openmeteo.fetch_current_grid(model)
+        from app.currents import fetch_current_grid as fetch_currents
+
+        return await fetch_currents(model)
     except Exception as exc:
         log.warning("current live fetch failed: %s", exc)
         return openmeteo.synthetic_currents(

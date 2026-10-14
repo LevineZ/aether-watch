@@ -62,18 +62,40 @@ PREVIEW_MODELS: list[dict[str, Any]] = [
 
 PREVIEW_BY_ID = {m["id"]: m for m in PREVIEW_MODELS}
 
-# Open-Meteo Marine Weather API models that actually carry ocean currents.
+# Current chips. best_match tries OSCAR v2 → CMEMS → Open-Meteo Marine.
 CURRENT_MODELS: list[dict[str, Any]] = [
     {
         "id": "best_match",
-        "short": "Marine",
-        "name": "Open-Meteo Marine Best Match",
-        "agency": "Open-Meteo",
+        "short": "Auto",
+        "name": "OSCAR / CMEMS / Marine auto",
+        "agency": "AetherWatch",
         "kind": "currents",
-        "source": "open-meteo-marine",
+        "source": "auto",
         "color": "#1d6a7a",
-        "resolution": "~8 km",
-        "notes": "SMOC / MFWAM blend; free marine-api.open-meteo.com.",
+        "resolution": "0.25° / 0.083° / OM",
+        "notes": "OSCAR v2.0 then CMEMS PHY 001-024, Open-Meteo Marine fallback.",
+    },
+    {
+        "id": "oscar_v2",
+        "short": "OSCAR",
+        "name": "OSCAR v2.0 NRT",
+        "agency": "NASA / ESR",
+        "kind": "currents",
+        "source": "oscar-v2",
+        "color": "#0e7490",
+        "resolution": "0.25° daily",
+        "notes": "PO.DAAC OSCAR_L4_OC_NRT_V2.0. Needs Earthdata token or user/pass.",
+    },
+    {
+        "id": "cmems_glo_phy",
+        "short": "CMEMS",
+        "name": "CMEMS Global Ocean Physics",
+        "agency": "Mercator / CMEMS",
+        "kind": "currents",
+        "source": "cmems",
+        "color": "#155e75",
+        "resolution": "0.083° daily",
+        "notes": "DOI 10.48670/moi-00016. Needs CMEMS username/password or token.",
     },
     {
         "id": "meteofrance_currents",
@@ -84,7 +106,7 @@ CURRENT_MODELS: list[dict[str, Any]] = [
         "source": "open-meteo-marine",
         "color": "#0f766e",
         "resolution": "0.08°",
-        "notes": "Eulerian currents, waves and tides.",
+        "notes": "Eulerian currents via Open-Meteo Marine (fallback path).",
     },
 ]
 CURRENT_BY_ID = {m["id"]: m for m in CURRENT_MODELS}

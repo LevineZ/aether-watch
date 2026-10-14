@@ -663,13 +663,13 @@ async def _fetch_current_patch(
     return u, v, filled
 
 
-async def fetch_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
-    """Surface ocean currents from Open-Meteo Marine, plus a China-seas nest."""
+async def fetch_om_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
+    """Open-Meteo Marine only. OSCAR/CMEMS orchestration lives in app.currents."""
     bbox = {"west": -180.0, "south": -70.0, "east": 180.0, "north": 70.0}
     nx = int(nx or settings.current_nx)
     ny = int(ny or settings.current_ny)
     marine_model = model if model in CURRENT_BY_ID else "best_match"
-    cache_key = f"currents:v3:{marine_model}:{nx}x{ny}:nest"
+    cache_key = f"currents:v4:om:{marine_model}:{nx}x{ny}:nest"
     hit = await cache_get_prefer(cache_key)
     if hit:
         hit["cached"] = True
@@ -711,6 +711,12 @@ async def fetch_current_grid(model: str = "best_match", nx: int | None = None, n
         pass
     await cache_remember(cache_key, out, settings.current_cache_ttl_seconds)
     return out
+
+
+async def fetch_current_grid(model: str = "best_match", nx: int | None = None, ny: int | None = None) -> dict[str, Any]:
+    from app.currents import fetch_current_grid as _orchestrated
+
+    return await _orchestrated(model, nx=nx, ny=ny)
 
 
 def synthetic_currents(nx: int, ny: int, bbox: dict[str, float], reason: str = "fallback") -> dict[str, Any]:

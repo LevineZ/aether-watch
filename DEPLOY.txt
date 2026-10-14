@@ -1,8 +1,8 @@
 AetherWatch — Mac Docker Compose deploy
 =======================================
 
-This tree is the PR head for the post-#2 Mac deploy fixes
-(borders, overlays, current-particle seeding, Open-Meteo 429 throttle).
+This tree is the PR head for OSCAR/CMEMS cached currents, sheet
+particles, and faster forecast field coatings.
 
 Apple Silicon and Intel both work with Compose.
 
@@ -18,24 +18,55 @@ Caddy still fronts the stack at http://127.0.0.1:8765
 (or AETHERWATCH_PORT). Do not rebuild postgres / redis / minio / caddy
 unless their configs changed.
 
+Hard-refresh checklist
+----------------------
+
+1. Rebuild api + worker + web (command above).
+2. Hard-refresh the browser: ⌘⇧R (Mac) or Ctrl+Shift+R.
+3. Earth `/` — 洋流 particles should look like overlapping faded sheets
+   (not thin racing lines), no currents on land, 观潮 orange 十段线 solid.
+   Source line: OSCAR v2 / CMEMS if you set keys, else Open-Meteo Marine
+   or last-good / 合成场.
+4. Forecast `/forecast` — each panel should show a colored field coating
+   on the basemap (coarse first, then refine). 起报 / 有效 … 北京时 on
+   every card. Linked pan/zoom still synced.
+5. No Redis FLUSHDB required. Cache keys are versioned (`currents:v4:`,
+   `field:v4:`, `wind:v2:`). Last-good is kept.
+
+Optional ocean-current keys (do not commit)
+------------------------------------------
+
+Put these in `.env` on the Mac. Empty = Open-Meteo Marine fallback.
+
+    # NASA Earthdata — OSCAR v2.0 NRT (OSCAR_L4_OC_NRT_V2.0)
+    EARTHDATA_USERNAME=
+    EARTHDATA_PASSWORD=
+    EARTHDATA_TOKEN=
+
+    # Copernicus Marine — DOI 10.48670/moi-00016
+    CMEMS_USERNAME=
+    CMEMS_PASSWORD=
+    CMEMS_TOKEN=
+    # toolbox aliases also work:
+    # COPERNICUSMARINE_SERVICE_USERNAME=
+    # COPERNICUSMARINE_SERVICE_PASSWORD=
+
+    CURRENT_SOURCE=auto          # auto | oscar | cmems | open-meteo
+    CURRENT_SOURCE_NX=36
+    CURRENT_SOURCE_NY=18
+
+Optional: `pip install copernicusmarine` inside the API image if you
+want the official CMEMS ARCO client. Daily fields cache in MinIO
+`currents/` and `/tmp/aetherwatch-currents`.
+
 What you should see
 -------------------
 
 - Earth: PRC land outline + 南海诸岛十段线 as a solid 观潮 orange
   stroke (above particles / overlays). 十段线 is short geometry segments.
 - Forecast: the same borders as a thick dark solid above the heatmap.
-- Currents: particles seeded across Pacific / Atlantic / Indian / Southern
-  / China seas — not piled only in 南海.
-
-Stale Redis overlays
---------------------
-
-Cache keys are versioned (field:v4:, currents:v3:, wind:v2:).
-Flush only if you still see an old overlay after rebuild:
-
-    curl -X POST -H "X-Admin-Token: aether-dev" http://127.0.0.1:8765/api/admin/cache/flush
-
-Prefer the admin flush (keeps last-good, delayed prewarm) over FLUSHDB.
+- Currents: soft overlapping flakes across Pacific / Atlantic / Indian /
+  Southern / China seas — not piled only in 南海, not on land.
 
 Open-Meteo (do not hammer)
 --------------------------
@@ -50,14 +81,15 @@ Defaults prefer stability over density (free API 429s easily):
     OPEN_METEO_MIN_INTERVAL_SECONDS=0.75
 
 Do not raise concurrency above 1 on a laptop deploy.
-First field fetch is slower on a cold cache (serial + paced);
-after that Redis serves it. On 429 the API backs off and prefers
-the last-good cache. Raise FIELD_NX / FIELD_NY only if you have quota.
+Forecast now paints an 8×6 coating in parallel, then refines 20×15
+one model at a time. After the first success Redis serves it.
 
 Useful commands
 ---------------
 
     docker compose up -d --build api worker web
     docker compose logs -f api web
-    docker compose exec redis redis-cli FLUSHDB
+    curl -X POST -H "X-Admin-Token: aether-dev" http://127.0.0.1:8765/api/admin/cache/flush
     docker compose down
+
+Prefer the admin flush (keeps last-good, delayed prewarm) over FLUSHDB.
