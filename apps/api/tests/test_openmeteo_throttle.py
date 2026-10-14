@@ -97,6 +97,7 @@ class ChinaGeoTest(unittest.TestCase):
         scripts = [
             REPO / "apps" / "web" / "utils" / "interp.test.ts",
             REPO / "apps" / "web" / "utils" / "flowSegment.test.ts",
+            REPO / "apps" / "web" / "utils" / "currentSheet.test.ts",
         ]
         result = subprocess.run(
             ["node", "--experimental-strip-types", "--test", *[str(s) for s in scripts]],
@@ -121,13 +122,25 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertIn("VECTOR_UPSAMPLE", text)
         self.assertIn("windSpeedField", text)
         layer = (REPO / "apps" / "web" / "utils" / "windLayer.ts").read_text(encoding="utf-8")
+        sheet = (REPO / "apps" / "web" / "utils" / "currentSheet.ts").read_text(encoding="utf-8")
         self.assertIn("TRIANGLE_STRIP", layer)
         self.assertNotIn("drawArrays(gl.LINES", layer)
         self.assertRegex(layer, r"const TRAIL = [3-5][0-9]")
-        match = __import__("re").search(r"const CURRENT_STEP = ([0-9.]+)", layer)
+        match = __import__("re").search(r"export const CURRENT_STEP = ([0-9.]+)", sheet)
         self.assertIsNotNone(match)
         self.assertGreaterEqual(float(match.group(1)), 0.15)
         self.assertLessEqual(float(match.group(1)), 0.26)
+        fade = __import__("re").search(r"export const CURRENT_FADE = ([0-9.]+)", sheet)
+        self.assertIsNotNone(fade)
+        self.assertGreaterEqual(float(fade.group(1)), 0.94)
+        self.assertLessEqual(float(fade.group(1)), 0.97)
+        segs = __import__("re").search(r"export const CURRENT_STROKE_SEGS = ([0-9]+)", sheet)
+        self.assertIsNotNone(segs)
+        self.assertLessEqual(int(segs.group(1)), 4)
+        self.assertIn("destination-in", layer)
+        self.assertIn("sheetFade", layer)
+        self.assertIn("CURRENT_STROKE_SEGS", layer)
+        self.assertNotIn("pow(sin(tt", layer)
         self.assertIn("u_width", layer)
         self.assertIn("MAX_NDC", layer)
         self.assertIn("v_keep", layer)

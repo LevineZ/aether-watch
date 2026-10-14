@@ -95,6 +95,7 @@ onMounted(async () => {
   map = new maplibregl.Map({
     container: host.value,
     style: style as never,
+    projection: { type: "globe" },
     center: [110, 30],
     zoom: 1.68,
     minZoom: 0.7,
@@ -108,9 +109,11 @@ onMounted(async () => {
     renderWorldCopies: false,
   })
   map.touchPitch.disable()
+  const chinaView = { center: [110, 30] as [number, number], zoom: 1.68 }
   map.on("style.load", () => {
     if (!map || !layer || !scalarLayer) return
     restyleGlobe(map, locale.value)
+    map.jumpTo(chinaView)
     const before = firstSymbolId(map)
     if (!map.getLayer(scalarLayer.id)) {
       if (before) map.addLayer(scalarLayer, before)
@@ -121,6 +124,9 @@ onMounted(async () => {
     void applyChinaBorders(map, "globe").then(() => raiseChinaBorders(map))
     ready.value = true
     emit("ready")
+  })
+  map.once("load", () => {
+    map?.jumpTo(chinaView)
   })
   ro = new ResizeObserver(onResize)
   ro.observe(wrap.value)
