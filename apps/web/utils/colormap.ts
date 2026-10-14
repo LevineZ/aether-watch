@@ -32,23 +32,3 @@ export function colorAt(palette: Palette, t: number): [number, number, number] {
 export function paletteCss(palette: Palette) {
   return `linear-gradient(90deg, ${(STOPS[palette] || STOPS.thermal).join(",")})`
 }
-
-export function sampleBilinear(grid: (number | null)[][], x: number, y: number) {
-  const ny = grid.length
-  const nx = grid[0]?.length || 0
-  if (!nx || !ny) return null
-  const x0 = Math.max(0, Math.min(nx - 1, Math.floor(x)))
-  const y0 = Math.max(0, Math.min(ny - 1, Math.floor(y)))
-  const x1 = Math.min(nx - 1, x0 + 1)
-  const y1 = Math.min(ny - 1, y0 + 1)
-  const fx = x - x0
-  const fy = y - y0
-  const v00 = grid[y0][x0]
-  const v10 = grid[y0][x1]
-  const v01 = grid[y1][x0]
-  const v11 = grid[y1][x1]
-  if (v00 == null || v10 == null || v01 == null || v11 == null) {
-    return v00 ?? v10 ?? v01 ?? v11
-  }
-  return v00 * (1 - fx) * (1 - fy) + v10 * fx * (1 - fy) + v01 * (1 - fx) * fy + v11 * fx * fy
-}

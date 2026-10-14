@@ -1,11 +1,13 @@
 import type { CustomLayerInterface, Map as MlMap } from "maplibre-gl"
-import { isOcean, randomOceanPoint } from "./landmask"
+import { isOcean } from "./landmask"
 import {
   mercatorX,
   mercatorY,
   packWind,
+  randomCurrentPoint,
   randomLat,
   sampleWind,
+  targetParticleCount,
   wrapLon,
   type Wind,
   type WindGrid,
@@ -27,8 +29,11 @@ type RenderArgs = {
 
 const TRAIL = 10
 const STRIDE = 4
-const MAX_PARTICLES = 20000
+const MAX_PARTICLES = 36000
 const VERTS_PER_PARTICLE = (TRAIL - 1) * 2
+/** Degrees per 16.67ms at 1 m/s. Currents must stay calm vs wind. */
+const CURRENT_STEP = 0.038
+const WIND_STEP = 0.034
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
   const sh = gl.createShader(type)
@@ -132,7 +137,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   resize(width: number, dpr: number) {
-    const next = Math.min(MAX_PARTICLES, Math.max(4000, Math.round(this.baseCount(width, dpr) * this.quality())))
+    const next = Math.min(MAX_PARTICLES, Math.max(6000, Math.round(this.baseCount(width, dpr) * this.quality())))
     if (next !== this.count) this.seed(next)
   }
 
@@ -147,7 +152,7 @@ export class WindParticleLayer implements CustomLayerInterface {
     this.reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
     this.pageHidden = document.hidden
     const w = map.getContainer().clientWidth || window.innerWidth
-    if (!this.count) this.seed(this.baseCount(w, Math.min(window.devicePixelRatio || 1, 1.75)))
+    if (!this.count) this.seed(this.baseCount(w, Math.min(window.devicePixelRatio || 1, 2)))
 
     const onVis = () => {
       this.pageHidden = document.hidden
@@ -189,7 +194,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   render(gl: WebGL2RenderingContext, args: RenderArgs) {
-    if (!this.playing || !this.grid || this.usedVerts < 2) return
+    if (!this.visible || !this.playing || !this.grid || this.usedVerts < 2) return
     const bundle = this.getShader(gl, args)
     if (!bundle) return
 
@@ -231,11 +236,8 @@ export class WindParticleLayer implements CustomLayerInterface {
   }
 
   private baseCount(width: number, dpr: number) {
-    if (this.reduced) return 2500
-    if (width < 720) return 8000
-    if (width < 1100) return 13000
-    if (dpr > 1.7) return 15000
-    return 18000
+    if (this.reduced) return this.kind === "current" ? 4000 : 3200
+    return Math.min(MAX_PARTICLES, targetParticleCount(width, dpr, this.kind))
   }
 
   private quality() {
@@ -254,12 +256,12 @@ export class WindParticleLayer implements CustomLayerInterface {
     let lon = Math.random() * 360 - 180
     let lat = randomLat()
     if (this.kind === "current") {
-      ;[lon, lat] = randomOceanPoint()
+      ;[lon, lat] = randomCurrentPoint()
       if (this.grid) {
-        for (let t = 0; t < 12; t++) {
-          ;[lon, lat] = randomOceanPoint()
+        for (let t = 0; t < 16; t++) {
+          ;[lon, lat] = randomCurrentPoint()
           const [u, v] = sampleWind(this.grid, lon, lat, true)
-          if (Math.hypot(u, v) > 0.02 && isOcean(lon, lat)) break
+          if (Math.hypot(u, v) > 0.012 && isOcean(lon, lat)) break
         }
       }
     }
@@ -300,16 +302,16 @@ export class WindParticleLayer implements CustomLayerInterface {
     const grid = this.grid
     if (!grid) return
     const current = this.kind === "current"
-    const step = (current ? 0.26 : 0.034) * (dt / 16.67)
-    const dead = current ? 0.018 : 0.1
+    const step = (current ? CURRENT_STEP : WIND_STEP) * (dt / 16.67)
+    const dead = current ? 0.01 : 0.1
     const interacting = this.interacting
-    const n = interacting ? (this.count * 0.62) | 0 : this.count
+    const n = interacting ? (this.count * 0.55) | 0 : this.count
     const cam = this.map?.getCenter()
     const camLon = cam?.lng ?? 0
     const camLat = cam?.lat ?? 0
     const sinCam = Math.sin(camLat * (Math.PI / 180))
     const cosCam = Math.cos(camLat * (Math.PI / 180))
-    const maxAge = interacting ? 70 : current ? 140 : 110
+    const maxAge = interacting ? 80 : current ? 280 : 120
     let w = 0
     const verts = this.verts
     const minCos = 0.02
