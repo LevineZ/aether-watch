@@ -53,3 +53,10 @@ def exists(key: str) -> bool:
         return True
     except S3Error:
         return False
+
+
+def try_get_bytes(key: str) -> bytes | None:
+    try:
+        return get_bytes(key)
+    except Exception:
+        return None

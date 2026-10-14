@@ -124,11 +124,11 @@ export function mercatorY(lat: number) {
  * reads as nullschool streamlines rather than sparse tubes; wind stays a bit sparser.
  */
 export function targetParticleCount(width: number, dpr: number, kind: "wind" | "current" = "wind") {
-  const bias = kind === "current" ? 1.55 : 1.05
-  if (width < 720) return Math.round(9000 * bias)
-  if (width < 1100) return Math.round(12000 * bias)
-  if (dpr > 1.6) return Math.round(14000 * bias)
-  return Math.round(16000 * bias)
+  const bias = kind === "current" ? 1.85 : 1.05
+  if (width < 720) return Math.round(10000 * bias)
+  if (width < 1100) return Math.round(13000 * bias)
+  if (dpr > 1.6) return Math.round(15000 * bias)
+  return Math.round(17000 * bias)
 }
 
 /** Client-side speed scalar from the same u/v grid (no extra Open-Meteo fetch). */

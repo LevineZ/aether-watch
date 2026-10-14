@@ -6,8 +6,8 @@
         {{ title }}
       </h3>
       <div class="map-meta">
-        <span class="map-clock">{{ t("forecast.init") }} {{ initLabel }}</span>
-        <span class="map-clock map-clock-valid">{{ t("forecast.valid") }} {{ validLabel }}</span>
+        <span class="map-clock">{{ t("forecast.init") }} {{ initLabel }} {{ t("forecast.bjt") }}</span>
+        <span class="map-clock map-clock-valid">{{ t("forecast.valid") }} {{ validLabel }} {{ t("forecast.bjt") }}</span>
         <span class="map-src" :title="sourceTitle">{{ sourceLine }}</span>
       </div>
       <div class="map-tools" role="group" :aria-label="t('forecast.ariaZoom')">
@@ -126,21 +126,25 @@ function applyCamera(cam: MapCamera) {
 
 function paint() {
   if (!map || !props.field) return
+  if (!map.isStyleLoaded()) {
+    map.once("idle", () => paint())
+    return
+  }
   const ny = props.field.values.length
   const nx = props.field.values[0]?.length || 0
   const url = rasterizeField(
     props.field,
     props.palette || "thermal",
-    Math.min(2560, Math.max(1280, nx * 64)),
-    Math.min(1920, Math.max(960, ny * 64)),
+    Math.min(1600, Math.max(480, nx * 48)),
+    Math.min(1200, Math.max(360, ny * 48)),
     "bilinear",
-    { signalAlpha: signalPalette(props.palette || "thermal"), opacity: 198, prefilter: false },
+    { signalAlpha: signalPalette(props.palette || "thermal"), opacity: 230, prefilter: false },
   )
   const coordinates = fieldCorners(props.field)
   const src = map.getSource("field") as maplibregl.ImageSource | undefined
   if (src) {
     src.updateImage({ url, coordinates })
-  } else if (map.isStyleLoaded()) {
+  } else {
     map.addSource("field", { type: "image", url, coordinates })
     const before = firstPrcLayerId(map) || map.getStyle()?.layers?.find((l) => l.type === "symbol")?.id
     map.addLayer(
@@ -149,7 +153,7 @@ function paint() {
         type: "raster",
         source: "field",
         paint: {
-          "raster-opacity": 0.78,
+          "raster-opacity": 0.9,
           "raster-fade-duration": 0,
           "raster-resampling": "linear",
         },

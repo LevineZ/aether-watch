@@ -38,7 +38,7 @@ export function rasterizeField(
   const ny = field.values.length
   const nx = field.values[0]?.length || 0
   const signal = !!opts?.signalAlpha
-  const opacity = opts?.opacity ?? 208
+  const opacity = opts?.opacity ?? 228
   const prefilter = !!opts?.prefilter
   const key = `${field.model || ""}|${field.valid_time || ""}|${nx}x${ny}|${field.min}|${field.max}|${palette}|${width}x${height}|${mode}|${signal}|${opacity}|${prefilter}`
   const hit = rasterMemo.get(key)
@@ -84,9 +84,9 @@ export function rasterizeField(
 }
 
 function edgeFade(i: number, j: number, w: number, h: number) {
-  const mx = Math.min(i, w - 1 - i) / Math.max(1, w * 0.012)
-  const my = Math.min(j, h - 1 - j) / Math.max(1, h * 0.012)
-  return Math.min(1, Math.max(0, Math.min(mx, my)))
+  const mx = Math.min(i, w - 1 - i) / Math.max(1, w * 0.006)
+  const my = Math.min(j, h - 1 - j) / Math.max(1, h * 0.006)
+  return Math.min(1, Math.max(0.72, Math.min(mx, my)))
 }
 
 /** Optional 3×3 valid-neighbor blur. Off by default so bilinear stays continuous, not blotchy. */

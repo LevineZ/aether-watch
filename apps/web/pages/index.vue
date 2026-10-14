@@ -117,7 +117,9 @@ const weatherModels: ModelChip[] = [
   { id: "icon_seamless", short: "ICON" },
 ]
 const marineModels: ModelChip[] = [
-  { id: "best_match", short: "Marine" },
+  { id: "best_match", short: "Auto" },
+  { id: "oscar_v2", short: "OSCAR" },
+  { id: "cmems_glo_phy", short: "CMEMS" },
   { id: "meteofrance_currents", short: "SMOC" },
 ]
 

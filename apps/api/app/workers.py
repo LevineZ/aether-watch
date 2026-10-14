@@ -137,7 +137,7 @@ async def _invalidate_catalog() -> None:
         from app.openmeteo import cache
 
         r = await cache()
-        await r.delete("catalog:v1")
+        await r.delete("catalog:v2")
     except Exception:
         return
 

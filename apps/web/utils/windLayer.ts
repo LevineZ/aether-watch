@@ -33,20 +33,19 @@ type RenderArgs = {
  * History points per particle.
  * Currents need a longer faded trail so slow advection still reads as nullschool streamlines.
  */
-const TRAIL = 36
+const TRAIL = 44
 /** pos.xy, other.xy, side, speed, alpha, trailT */
 const STRIDE = 8
-const MAX_PARTICLES = 20000
+const MAX_PARTICLES = 22000
 /** Two verts per history point + a few degenerates to join strips. */
 const VERTS_PER_PARTICLE = TRAIL * 2 + 16
 /**
  * Degrees per 16.67ms at 1 m/s.
- * PR#6 used 0.58 so 观潮 ribbons raced; ~half of that (0.25) reads as calm ocean sheets
- * at default China globe zoom. Wind stays at the faster 0.03 step.
- * cambecc/earth currents use velocityScale 1/4400 vs wind 1/60000, but their canvas
- * fade (destination-in 0.97) + 1px strokes make motion feel slower than raw scale.
+ * Stay at or below 0.25 — faster reads as racing lines, not nullschool sheets.
+ * cambecc/earth currents use velocityScale 1/4400 vs wind 1/60000, plus a
+ * destination-in 0.97 fade. We keep a calm step and build density with overlap.
  */
-const CURRENT_STEP = 0.25
+const CURRENT_STEP = 0.22
 const WIND_STEP = 0.03
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string) {
@@ -285,8 +284,8 @@ export class WindParticleLayer implements CustomLayerInterface {
   private ribbonWidth() {
     const z = this.map?.getZoom() ?? 1.7
     if (this.kind === "current") {
-      const zoomMul = z < 2.15 ? 1.06 : z < 3.4 ? 1.0 : 0.88
-      return 1.22 * zoomMul
+      const zoomMul = z < 2.15 ? 1.12 : z < 3.4 ? 1.0 : 0.9
+      return 1.55 * zoomMul
     }
     const zoomMul = z < 2.15 ? 1.22 : z < 3.4 ? 1.0 : 0.85
     return 2.2 * zoomMul
@@ -460,8 +459,8 @@ export class WindParticleLayer implements CustomLayerInterface {
         const ox = this.histX[o + other]
         const oy = this.histY[o + other]
         const t = (k - start + 1) / (segs + 1)
-        // nullschool fade is destination-in 0.97/frame; quadratic tail → soft sheets.
-        const alpha = current ? t * t * 0.5 : Math.pow(t, 0.72)
+        // Soft faded tail: many overlapping flakes, not a hard linear stroke.
+        const alpha = current ? t * t * t * 0.38 + t * t * 0.16 : Math.pow(t, 0.72)
         const linked = k > start && segOk(this.histX[o + k - 1], this.histY[o + k - 1], x, y)
         if (!linked) {
           if (k === TRAIL - 1 || !segOk(x, y, ox, oy)) {
@@ -524,7 +523,9 @@ void main() {
   if (len < 1e-7 || len > MAX_NDC || abs(ndcA.x) > 1.25 || abs(ndcA.y) > 1.25) keep = 0.0;
   vec2 n = len > 1e-7 ? vec2(-dir.y, dir.x) / len : vec2(0.0, 1.0);
   // Currents: mid-trail flake (片状), not a constant-width tube.
-  float flake = u_kind > 0.5 ? mix(0.52, 1.0, sin(clamp(a_trail, 0.0, 1.0) * 3.14159265)) : 1.0;
+  float tt = clamp(a_trail, 0.0, 1.0);
+  // Mid-trail bulge + soft ends → overlapping flakes, not a constant-width tube.
+  float flake = u_kind > 0.5 ? mix(0.28, 1.18, pow(sin(tt * 3.14159265), 1.35)) : 1.0;
   float slim = 1.0 - smoothstep(0.028, MAX_NDC, len);
   vec2 offset = keep > 0.5 ? n * a_side * u_width * u_pixel * flake * slim : vec2(0.0);
   gl_Position = vec4((ndcA + offset) * a.w, a.z, a.w);
@@ -563,8 +564,9 @@ void main() {
         : t < 0.66 ? mix(c2, c3, (t - 0.33) / 0.33)
         : mix(c3, c4, (t - 0.66) / 0.34);
   }
-  float edge = 1.0 - smoothstep(0.55, 1.0, abs(v_side));
-  float a = v_alpha * edge * (u_kind > 0.5 ? (0.42 + 0.40 * t) : (0.58 + 0.42 * t));
+  float edge = 1.0 - smoothstep(0.22, 1.0, abs(v_side));
+  float sheet = u_kind > 0.5 ? (0.22 + 0.34 * t) : (0.58 + 0.42 * t);
+  float a = v_alpha * edge * sheet;
   fragColor = vec4(col * a, a);
 }`
     const program = link(gl, vs, fs)

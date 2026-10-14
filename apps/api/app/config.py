@@ -14,6 +14,27 @@ class Settings(BaseSettings):
     admin_token: str = "aether-dev"
     open_meteo_base: str = "https://api.open-meteo.com"
     open_meteo_marine_base: str = "https://marine-api.open-meteo.com"
+    # OSCAR v2.0 (NASA Earthdata / PO.DAAC). Token or username+password; never commit secrets.
+    earthdata_username: str = ""
+    earthdata_password: str = ""
+    earthdata_token: str = ""
+    oscar_short_name: str = "OSCAR_L4_OC_NRT_V2.0"
+    oscar_collection_id: str = "C2102958977-POCLOUD"
+    # CMEMS Global Ocean Physics Analysis and Forecast (DOI 10.48670/moi-00016).
+    # Accept CMEMS_* or COPERNICUSMARINE_SERVICE_* (toolbox env names).
+    cmems_username: str = ""
+    cmems_password: str = ""
+    cmems_token: str = ""
+    copernicusmarine_service_username: str = ""
+    copernicusmarine_service_password: str = ""
+    copernicusmarine_service_token: str = ""
+    cmems_dataset_id: str = "cmems_mod_glo_phy-cur_anfc_0.083deg_P1D-m"
+    cmems_product_id: str = "GLOBAL_ANALYSISFORECAST_PHY_001_024"
+    current_source: str = "auto"
+    current_source_nx: int = 36
+    current_source_ny: int = 18
+    current_source_cache_ttl_seconds: int = 86400
+    current_field_dir: str = "/tmp/aetherwatch-currents"
     news_dir: str = "/content/news"
     geo_dir: str = "/content/geo"
     content_dir: str = "/content"

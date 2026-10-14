@@ -44,8 +44,8 @@
       <div class="tax">
         <div class="tax-top">
           <span>{{ t("forecast.lead") }}</span>
-          <strong class="tax-now">{{ t("forecast.valid") }} {{ validStamp }}</strong>
-          <span class="tax-init">{{ t("forecast.init") }} {{ initStamp }}</span>
+          <strong class="tax-now">{{ t("forecast.valid") }} {{ validStamp }} {{ t("forecast.bjt") }}</strong>
+          <span class="tax-init">{{ t("forecast.init") }} {{ initStamp }} {{ t("forecast.bjt") }}</span>
           <span class="tax-hint">{{ t("forecast.kindNote") }} · +{{ lead }}h · {{ t("forecast.bjtRange") }}</span>
           <button class="play" type="button" :aria-pressed="playing" @click="togglePlay">
             {{ playing ? t("forecast.pause") : t("forecast.play") }}
@@ -330,8 +330,58 @@ async function loadSeries() {
   }
 }
 
-function fieldKey(id: string, bbox: GeoBbox) {
-  return `${id}|${variable.value}|${lead.value}|${bbox.west}|${bbox.south}|${bbox.east}|${bbox.north}`
+const COARSE_NX = 8
+const COARSE_NY = 6
+
+function fieldKey(id: string, bbox: GeoBbox, nx?: number, ny?: number) {
+  const grid = nx && ny ? `${nx}x${ny}` : "def"
+  return `${id}|${variable.value}|${lead.value}|${bbox.west}|${bbox.south}|${bbox.east}|${bbox.north}|${grid}`
+}
+
+function fieldCells(field?: ScalarField | null) {
+  return field?.values?.[0]?.length || field?.nx || 0
+}
+
+function rememberField(key: string, data: ScalarField) {
+  fieldCache.set(key, data)
+  if (fieldCache.size > 64) fieldCache.delete(fieldCache.keys().next().value as string)
+}
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+async function fetchFieldOnce(id: string, bbox: GeoBbox, nx?: number, ny?: number) {
+  const key = fieldKey(id, bbox, nx, ny)
+  const cached = fieldCache.get(key)
+  if (cached) return cached
+  const query: Record<string, string | number> = {
+    model: id,
+    variable: variable.value,
+    step: lead.value,
+    west: bbox.west,
+    south: bbox.south,
+    east: bbox.east,
+    north: bbox.north,
+  }
+  if (nx) query.nx = nx
+  if (ny) query.ny = ny
+  const data = await $fetch<ScalarField>(resolveApi("/api/field"), { query })
+  rememberField(key, data)
+  return data
+}
+
+async function fetchFieldBackoff(id: string, bbox: GeoBbox, nx?: number, ny?: number) {
+  let last: unknown
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await fetchFieldOnce(id, bbox, nx, ny)
+    } catch (e) {
+      last = e
+      await sleep(Math.min(8000, 350 * 2 ** attempt))
+    }
+  }
+  throw last
 }
 
 async function loadFields() {
@@ -345,30 +395,36 @@ async function loadFields() {
     if (fields.value[id]) kept[id] = fields.value[id]
   }
   fields.value = kept
-  for (const id of ids) {
-    const key = fieldKey(id, bbox)
-    const cached = fieldCache.get(key)
-    try {
-      const data = cached || await $fetch<ScalarField>(resolveApi("/api/field"), {
-        query: {
-          model: id,
-          variable: variable.value,
-          step: lead.value,
-          west: bbox.west,
-          south: bbox.south,
-          east: bbox.east,
-          north: bbox.north,
-        },
-      })
-      if (!cached) {
-        fieldCache.set(key, data)
-        if (fieldCache.size > 48) fieldCache.delete(fieldCache.keys().next().value as string)
+
+  // Coarse coating first (parallel). Server still serializes Open-Meteo.
+  await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const data = await fetchFieldBackoff(id, bbox, COARSE_NX, COARSE_NY)
+        if (gen !== fieldGen) return
+        const cur = fields.value[id]
+        if (cur && fieldCells(cur) > COARSE_NX) return
+        fields.value = { ...fields.value, [id]: data }
+      } catch (e: unknown) {
+        if (gen !== fieldGen) return
+        fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
       }
+    }),
+  )
+  if (gen !== fieldGen) return
+
+  // Refine one model at a time so four 20×15 grids do not enqueue together.
+  for (const id of ids) {
+    if (gen !== fieldGen) return
+    try {
+      const data = await fetchFieldBackoff(id, bbox)
       if (gen !== fieldGen) return
       fields.value = { ...fields.value, [id]: data }
     } catch (e: unknown) {
       if (gen !== fieldGen) return
-      fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
+      if (!fields.value[id]) {
+        fieldError.value = e instanceof Error ? e.message : t("forecast.fieldFail")
+      }
     }
   }
   if (gen === fieldGen) fieldLoading.value = false
