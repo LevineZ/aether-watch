@@ -160,8 +160,9 @@ OSCAR and CMEMS keys stay in `.env` (compose interpolates them). Never commit se
 ### Cache, last-good, prewarm
 
 - Live keys expire at the TTLs above. A successful fetch also writes `*:last` (7 days).
-- On Open-Meteo **429 / sparse / empty**, endpoints return the last-good payload (`stale: true`) after a short retry instead of blocking for minutes.
-- API **first-idle prewarm** (≈2s after startup) serializes **China 20×15 气温/气压/降水 for GFS + IFS + AIFS**, then **currents**, **globe 16×10 气温/气压/降水**, **wind 20×10**, and **wave period**. Never parallel OM. Forecast header spinner clears as soon as any model paints; a single 429 does not freeze the page on 「加载中」.
+- On Open-Meteo **429 / sparse / empty**, endpoints return the last-good payload (`stale: true`) after a short retry instead of blocking for minutes. China `/api/field` never raises a bare 500: last-good first, else an empty grid with `error` / `unavailable` so the forecast card can show 暂无数据/限流.
+- `/api/globe-fields` on 429 prefers existing `field:v4` global grids over `synthetic:open-meteo-429`.
+- API **first-idle prewarm** (≈2s after startup) serializes **China 20×15 气温/气压/降水 for GFS + IFS + AIFS** with a gap between models. A 429 skips the remaining models that pass, then **retries with exponential backoff** until live+last `field:v4` keys land. Currents (OSCAR/CMEMS) still run; globe/wind/waves wait if OM is hot. Forecast header spinner clears as soon as any model paints; a single 429 shows a per-card error/retry instead of freezing 「加载中」.
 - `POST /api/admin/cache/flush` (admin token) drops **live** keys only, keeps last-good, and schedules prewarm after **15s**.
 - Daily OSCAR/CMEMS NetCDF-derived fields are also stored under MinIO `currents/` and `/tmp/aetherwatch-currents` so a Redis miss does not re-hit upstream.
 

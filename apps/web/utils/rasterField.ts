@@ -17,11 +17,18 @@ export type ScalarField = {
   bbox?: { west: number; south: number; east: number; north: number }
   model?: string
   model_id?: string
+  variable?: string
   source?: string
   provider?: string
   kind?: string
   nx?: number
   ny?: number
+  filled?: number
+  fallback?: boolean
+  stale?: boolean
+  degraded?: string
+  error?: string
+  unavailable?: boolean
 }
 
 const rasterMemo = new Map<string, string>()

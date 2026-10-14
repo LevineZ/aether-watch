@@ -27,7 +27,7 @@ class ForecastIngestActor:
     @staticmethod
     @broker.task(task_name="forecast_ingest")
     async def run(force: bool = False) -> dict:
-        from app.openmeteo import flush_live_cache, prewarm_hot_paths
+        from app.openmeteo import flush_live_cache, prewarm_hot_paths_resilient
 
         summary: dict = {"actor": "ForecastIngestActor", "force": force, "ok": [], "errors": {}}
         if force:
@@ -35,7 +35,7 @@ class ForecastIngestActor:
             dropped = await flush_live_cache()
             summary["dropped"] = dropped
         try:
-            warmed = await prewarm_hot_paths()
+            warmed = await prewarm_hot_paths_resilient()
             summary["ok"] = warmed.get("ok") or []
             summary["errors"] = warmed.get("errors") or {}
         except Exception as exc:

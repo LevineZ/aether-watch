@@ -185,6 +185,8 @@ class ChinaGeoTest(unittest.TestCase):
         self.assertIn("Promise.all", forecast)
         self.assertIn("pageBusy", forecast)
         self.assertIn("fieldPending", forecast)
+        self.assertIn("fieldErrors", forecast)
+        self.assertIn("retryField", forecast)
         self.assertNotIn("fetchFieldBackoff", forecast)
         fmap = (REPO / "apps" / "web" / "components" / "FieldMap.vue").read_text(encoding="utf-8")
         self.assertIn("raster-opacity", fmap)

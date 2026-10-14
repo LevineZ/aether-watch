@@ -28,6 +28,10 @@
       <div ref="host" class="map-host" :title="t('forecast.mapHint')"></div>
       <p class="map-hint">{{ t("forecast.mapHint") }}</p>
       <div v-if="loading" class="map-busy"><span class="apanel-spin" />{{ t("forecast.loading") }}</div>
+      <div v-else-if="error" class="map-error" role="status">
+        <p>{{ error }}</p>
+        <button type="button" class="mtool mtool-wide" @click="emit('retry')">{{ t("forecast.retry") }}</button>
+      </div>
     </div>
     <div class="scale">
       <span>{{ minLabel }}</span>
@@ -68,8 +72,9 @@ const props = withDefaults(
     source?: string | null
     modelId?: string | null
     leadHours?: number
+    error?: string | null
   }>(),
-  { palette: "thermal", color: "#c1440e", loading: false, leadHours: 0 },
+  { palette: "thermal", color: "#c1440e", loading: false, leadHours: 0, error: "" },
 )
 
 const emit = defineEmits<{
@@ -79,6 +84,7 @@ const emit = defineEmits<{
   "zoom-by": [delta: number]
   reset: []
   "reload-view": [bbox: GeoBbox]
+  retry: []
 }>()
 
 const { t, locale } = useI18n()
@@ -94,7 +100,9 @@ const maxLabel = computed(() => (props.field ? `${props.field.max.toFixed(1)}${p
 const initLabel = computed(() => beijingShort(props.field?.init_time || props.initTime))
 const validLabel = computed(() => beijingShort(props.field?.valid_time || props.validTime))
 const sourceLine = computed(() => {
+  if (props.error && !props.field) return t("forecast.noData")
   const model = props.field?.model_id || props.field?.model || props.modelId || ""
+  if (props.field?.stale) return t("forecast.sourceLine", { model: `${model || "open-meteo"} · stale` })
   return t("forecast.sourceLine", { model: model || "open-meteo" })
 })
 const sourceTitle = computed(() => t("forecast.kindNote"))
@@ -384,6 +392,24 @@ onBeforeUnmount(() => {
   background: rgba(255, 253, 248, 0.45);
   color: var(--ink-soft);
   font-size: 0.78rem;
+}
+.map-error {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-content: center;
+  place-items: center;
+  gap: 0.55rem;
+  background: rgba(255, 253, 248, 0.72);
+  color: var(--ink);
+  font-size: 0.78rem;
+  text-align: center;
+  padding: 1rem;
+}
+.map-error p {
+  margin: 0;
+  max-width: 16rem;
 }
 .apanel-spin {
   width: 1rem;

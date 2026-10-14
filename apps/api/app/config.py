@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     open_meteo_max_retries: int = 2
     open_meteo_backoff_base: float = 2.0
     open_meteo_backoff_cap_seconds: float = 8.0
+    # Startup prewarm: serial models with a gap; failed China/globe warms retry with backoff.
+    open_meteo_prewarm_gap_seconds: float = 2.5
+    open_meteo_prewarm_retry_base: float = 20.0
+    open_meteo_prewarm_retry_cap_seconds: float = 180.0
+    open_meteo_prewarm_max_attempts: int = 6
 
 
 settings = Settings()

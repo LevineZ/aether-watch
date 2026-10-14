@@ -165,14 +165,19 @@ async def cache_get_prefer(key: str) -> Any | None:
 
 
 async def last_good_on_rate_limit(key: str, *, reason: str = "open-meteo-429") -> dict[str, Any] | None:
-    """Redis live or :last copy, tagged so the UI can keep painting instead of spinning."""
-    stale = await cache_get_prefer(key)
-    if not stale:
-        return None
-    stale["cached"] = True
-    stale["stale"] = True
-    stale["degraded"] = reason
-    return stale
+    """Redis live or :last copy, tagged so the UI can keep painting instead of spinning.
+
+    Skip empty / synthetic / unavailable live keys so a hollow field:v4 cannot hide :last.
+    """
+    for candidate in (key, f"{key}:last"):
+        packed = await cache_get(candidate)
+        if not field_is_real(packed) and not globe_bag_is_real(packed):
+            continue
+        packed["cached"] = True
+        packed["stale"] = True
+        packed["degraded"] = reason
+        return packed
+    return None
 
 
 LIVE_PREFIXES = (
@@ -468,6 +473,164 @@ def _scalar_payload(
     return out
 
 
+def field_is_real(packed: dict[str, Any] | None) -> bool:
+    """True when a cached scalar grid is usable (not synthetic / empty / 429 stub)."""
+    if not packed or not isinstance(packed, dict):
+        return False
+    if packed.get("unavailable") or packed.get("error"):
+        return False
+    if str(packed.get("source") or "").startswith("synthetic"):
+        return False
+    if str(packed.get("source") or "").startswith("unavailable"):
+        return False
+    filled = packed.get("filled")
+    try:
+        if filled is not None and int(filled) >= 8:
+            return True
+    except (TypeError, ValueError):
+        pass
+    for row in packed.get("values") or []:
+        for val in row or []:
+            if val is None:
+                continue
+            try:
+                if math.isfinite(float(val)):
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def unavailable_field(
+    model: str,
+    variable: str,
+    bbox: dict[str, float],
+    nx: int,
+    ny: int,
+    *,
+    step: int = 0,
+    reason: str = "open-meteo-429",
+) -> dict[str, Any]:
+    """Empty grid + error fields so /api/field stays 200 and the UI can render a card error."""
+    lats, lons = _grid_points(bbox, nx, ny)
+    values = np.full((ny, nx), np.nan, dtype=float)
+    out = _scalar_payload(
+        variable,
+        model,
+        bbox,
+        lats,
+        lons,
+        values,
+        step=step,
+        source=f"unavailable:{reason}",
+        provider="open-meteo",
+        kind="unavailable",
+    )
+    out["error"] = reason
+    out["degraded"] = reason
+    out["unavailable"] = True
+    out["filled"] = 0
+    out["fallback"] = False
+    return out
+
+
+def pack_globe_fields(
+    model: str,
+    bbox: dict[str, float],
+    nx: int,
+    ny: int,
+    fields: dict[str, Any],
+    *,
+    source: str,
+    cached: bool = False,
+    fallback: bool = False,
+    degraded: str | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "model": model,
+        "model_id": model,
+        "fields": fields,
+        "source": source,
+        "cached": cached,
+        "nx": nx,
+        "ny": ny,
+        "bbox": bbox,
+        "fallback": fallback,
+    }
+    if degraded:
+        out["degraded"] = degraded
+    return out
+
+
+def globe_bag_is_real(bag: dict[str, Any] | None) -> bool:
+    if not bag or not isinstance(bag, dict):
+        return False
+    if bag.get("fallback") or str(bag.get("source") or "").startswith("synthetic"):
+        return False
+    fields = bag.get("fields") or {}
+    return any(field_is_real(fields.get(var)) for var in GLOBE_SCALAR_VARS)
+
+
+async def assemble_scalar_fields_from_v4(
+    model: str,
+    bbox: dict[str, float],
+    nx: int,
+    ny: int,
+    variables: tuple[str, ...] = GLOBE_SCALAR_VARS,
+    step: int = 0,
+) -> dict[str, Any]:
+    """Read already-cached field:v4 live/:last grids. Never hits Open-Meteo."""
+    fields: dict[str, Any] = {}
+    for var in variables:
+        element = ELEMENT_BY_ID.get(var)
+        if not element:
+            continue
+        key = field_cache_key(model, element["om"], bbox, nx, ny, step)
+        packed = await cache_get_prefer(key)
+        if field_is_real(packed):
+            fields[var] = packed
+    return fields
+
+
+async def globe_fields_from_v4(
+    model: str,
+    bbox: dict[str, float] | None = None,
+    nx: int | None = None,
+    ny: int | None = None,
+    *,
+    fill_synthetic: bool = False,
+    reason: str = "open-meteo-429",
+) -> dict[str, Any] | None:
+    """Rebuild /api/globe-fields from field:v4 so a 429 does not throw away live grids."""
+    model = weather_model_id(model)
+    bbox = dict(bbox or GLOBE_BBOX)
+    nx = int(nx or settings.globe_field_nx)
+    ny = int(ny or settings.globe_field_ny)
+    assembled = await assemble_scalar_fields_from_v4(model, bbox, nx, ny)
+    if not assembled:
+        return None
+    fields = dict(assembled)
+    if fill_synthetic:
+        for var in GLOBE_SCALAR_VARS:
+            if var not in fields:
+                fields[var] = synthetic_globe_field(var, nx, ny, bbox, reason=reason)
+    complete = all(var in assembled for var in GLOBE_SCALAR_VARS)
+    source = "field:v4" if complete else "field:v4+partial"
+    if fill_synthetic and not complete:
+        source = "field:v4+synthetic"
+    return pack_globe_fields(
+        model,
+        bbox,
+        nx,
+        ny,
+        fields if (complete or fill_synthetic) else assembled,
+        source=source,
+        cached=True,
+        fallback=bool(fill_synthetic and not complete),
+        degraded=None if complete else reason,
+    )
+
+
 def synthetic_globe_field(
     variable: str,
     nx: int,
@@ -551,7 +714,7 @@ async def fetch_field(
     om_var = element["om"]
     cache_key = field_cache_key(model, om_var, bbox, nx, ny, step)
     hit = await cache_get_prefer(cache_key)
-    if hit:
+    if field_is_real(hit):
         hit["cached"] = True
         return hit
 
@@ -586,11 +749,14 @@ async def fetch_field(
         payloads = await _gather_batches(points, batch)
     except OpenMeteoRateLimit:
         stale = await last_good_on_rate_limit(cache_key)
-        if stale:
+        if field_is_real(stale):
             return stale
         if globe:
+            v4 = await assemble_scalar_fields_from_v4(model, bbox, nx, ny, (variable,), step)
+            if field_is_real(v4.get(variable)):
+                return v4[variable]
             return synthetic_globe_field(variable, nx, ny, bbox, reason="open-meteo-429")
-        raise
+        return unavailable_field(model, variable, bbox, nx, ny, step=step, reason="open-meteo-429")
 
     for idx, payload in enumerate(payloads):
         if not payload:
@@ -609,15 +775,12 @@ async def fetch_field(
     finite = values[np.isfinite(values)]
     if not finite.size:
         stale = await cache_get_prefer(cache_key)
-        if stale:
+        if field_is_real(stale):
             stale["cached"] = True
             return stale
         if globe:
             return synthetic_globe_field(variable, nx, ny, bbox, reason="open-meteo-sparse")
-        out = _scalar_payload(
-            variable, model, bbox, lats, lons, values, init_time=init_time, valid_time=valid_time, step=step
-        )
-        return out
+        return unavailable_field(model, variable, bbox, nx, ny, step=step, reason="open-meteo-empty")
 
     out = _scalar_payload(
         variable, model, bbox, lats, lons, values, init_time=init_time, valid_time=valid_time, step=step
@@ -627,16 +790,23 @@ async def fetch_field(
 
 
 async def fetch_globe_fields(model: str = "gfs_seamless") -> dict[str, Any]:
-    """One Open-Meteo pass for globe 气温/气压/降水. Coarse grid, cached, synthetic fallback."""
+    """One Open-Meteo pass for globe 气温/气压/降水. Coarse grid, cached, v4 then synthetic."""
     model = weather_model_id(model)
     bbox = dict(GLOBE_BBOX)
     nx = int(settings.globe_field_nx)
     ny = int(settings.globe_field_ny)
     cache_key = f"globe-fields:v1:{model}:{nx}x{ny}:0"
-    hit = await cache_get_prefer(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
+    live = await cache_get(cache_key)
+    if globe_bag_is_real(live):
+        live["cached"] = True
+        return live
+
+    v4_bag = await globe_fields_from_v4(model, bbox, nx, ny, fill_synthetic=False)
+    if v4_bag and globe_bag_is_real(v4_bag) and all(
+        field_is_real((v4_bag.get("fields") or {}).get(var)) for var in GLOBE_SCALAR_VARS
+    ):
+        v4_bag["cached"] = True
+        return v4_bag
 
     lats, lons = _grid_points(bbox, nx, ny)
     points: list[tuple[float, float]] = [(lat, lon) for lat in lats for lon in lons]
@@ -664,23 +834,25 @@ async def fetch_globe_fields(model: str = "gfs_seamless") -> dict[str, Any]:
         payloads = await _gather_batches(points, batch)
     except OpenMeteoRateLimit:
         stale = await last_good_on_rate_limit(cache_key)
+        if globe_bag_is_real(stale):
+            return stale
+        mixed = await globe_fields_from_v4(model, bbox, nx, ny, fill_synthetic=True, reason="open-meteo-429")
+        if mixed and any(field_is_real((mixed.get("fields") or {}).get(var)) for var in GLOBE_SCALAR_VARS):
+            return mixed
         if stale:
             return stale
-        return {
-            "model": model,
-            "model_id": model,
-            "fields": {
-                var: synthetic_globe_field(var, nx, ny, bbox, reason="open-meteo-429") for var in GLOBE_SCALAR_VARS
-            },
-            "source": "synthetic:open-meteo-429",
-            "cached": False,
-            "nx": nx,
-            "ny": ny,
-            "bbox": bbox,
-            "fallback": True,
-            "degraded": "open-meteo-429",
-        }
+        return pack_globe_fields(
+            model,
+            bbox,
+            nx,
+            ny,
+            {var: synthetic_globe_field(var, nx, ny, bbox, reason="open-meteo-429") for var in GLOBE_SCALAR_VARS},
+            source="synthetic:open-meteo-429",
+            fallback=True,
+            degraded="open-meteo-429",
+        )
 
+    v4_partial = (v4_bag or {}).get("fields") or {}
     for idx, payload in enumerate(payloads):
         if not payload:
             continue
@@ -697,32 +869,46 @@ async def fetch_globe_fields(model: str = "gfs_seamless") -> dict[str, Any]:
                 grids[var][row, col] = val
 
     fields: dict[str, Any] = {}
-    live = False
+    live_n = 0
+    used_v4 = False
     for var, arr in grids.items():
         packed = _scalar_payload(
             var, model, bbox, lats, lons, arr, init_time=init_time, valid_time=valid_time, step=0
         )
         if int(packed.get("filled") or 0) < 8:
-            packed = synthetic_globe_field(var, nx, ny, bbox, reason="open-meteo-sparse")
+            if field_is_real(v4_partial.get(var)):
+                packed = v4_partial[var]
+                used_v4 = True
+            else:
+                packed = synthetic_globe_field(var, nx, ny, bbox, reason="open-meteo-sparse")
         else:
-            live = True
+            live_n += 1
         fields[var] = packed
 
-    out = {
-        "model": model,
-        "model_id": model,
-        "fields": fields,
-        "source": f"open-meteo:{model}",
-        "cached": False,
-        "nx": nx,
-        "ny": ny,
-        "bbox": bbox,
-        "fallback": not live,
-    }
-    if live:
+    if live_n:
+        source = f"open-meteo:{model}"
+        if used_v4:
+            source = f"open-meteo:{model}+field:v4"
+        out = pack_globe_fields(
+            model, bbox, nx, ny, fields, source=source, fallback=False
+        )
         await cache_remember(cache_key, out, settings.cache_ttl_seconds)
         await _write_through_field_keys(model, bbox, nx, ny, 0, fields)
-    return out
+        return out
+
+    mixed = await globe_fields_from_v4(model, bbox, nx, ny, fill_synthetic=True, reason="open-meteo-sparse")
+    if mixed and any(field_is_real((mixed.get("fields") or {}).get(var)) for var in GLOBE_SCALAR_VARS):
+        return mixed
+    return pack_globe_fields(
+        model,
+        bbox,
+        nx,
+        ny,
+        fields,
+        source="synthetic:open-meteo-sparse",
+        fallback=True,
+        degraded="open-meteo-sparse",
+    )
 
 
 async def _write_through_field_keys(
@@ -757,10 +943,10 @@ async def fetch_china_fields(
     nx = int(nx or settings.field_nx)
     ny = int(ny or settings.field_ny)
     cache_key = f"china-fields:v1:{model}:{nx}x{ny}:0"
-    hit = await cache_get_prefer(cache_key)
-    if hit:
-        hit["cached"] = True
-        return hit
+    live_hit = await cache_get(cache_key)
+    if live_hit and not live_hit.get("error") and not live_hit.get("fallback"):
+        live_hit["cached"] = True
+        return live_hit
 
     lats, lons = _grid_points(bbox, nx, ny)
     points: list[tuple[float, float]] = [(lat, lon) for lat in lats for lon in lons]
@@ -788,9 +974,40 @@ async def fetch_china_fields(
         payloads = await _gather_batches(points, batch)
     except OpenMeteoRateLimit:
         stale = await last_good_on_rate_limit(cache_key)
-        if stale:
+        if globe_bag_is_real(stale):
             return stale
-        raise
+        v4_fields = await assemble_scalar_fields_from_v4(model, bbox, nx, ny)
+        if v4_fields:
+            complete = all(var in v4_fields for var in GLOBE_SCALAR_VARS)
+            out = pack_globe_fields(
+                model,
+                bbox,
+                nx,
+                ny,
+                v4_fields,
+                source="field:v4" if complete else "field:v4+partial",
+                cached=True,
+                fallback=not complete,
+                degraded=None if complete else "open-meteo-429",
+            )
+            if complete:
+                await cache_remember(cache_key, out, settings.cache_ttl_seconds)
+            else:
+                out["error"] = "open-meteo-429"
+            return out
+        return {
+            **pack_globe_fields(
+                model,
+                bbox,
+                nx,
+                ny,
+                {},
+                source="unavailable:open-meteo-429",
+                fallback=True,
+                degraded="open-meteo-429",
+            ),
+            "error": "open-meteo-429",
+        }
 
     for idx, payload in enumerate(payloads):
         if not payload:
@@ -1350,49 +1567,160 @@ def synthetic_wind(nx: int, ny: int, bbox: dict[str, float], reason: str = "fall
 FORECAST_PREVIEW_MODELS = ("gfs_seamless", "ecmwf_ifs025", "ecmwf_aifs025_single")
 
 
-async def prewarm_hot_paths() -> dict[str, Any]:
+def _china_fields_live_ok(packed: dict[str, Any] | None) -> bool:
+    if not packed or packed.get("error") or packed.get("fallback") or packed.get("stale"):
+        return False
+    if str(packed.get("degraded") or "") in {"open-meteo-429", "open-meteo-empty"}:
+        return False
+    fields = packed.get("fields") or {}
+    return all(field_is_real(fields.get(var)) for var in GLOBE_SCALAR_VARS)
+
+
+def _is_om_429(reason: Any) -> bool:
+    text = str(reason or "").lower()
+    return "429" in text or "rate" in text
+
+
+def _prewarm_pending(summary: dict[str, Any]) -> list[str]:
+    return [
+        key
+        for key in (summary.get("errors") or {})
+        if key.startswith("china-fields-") or key == "globe-fields"
+    ]
+
+
+async def prewarm_hot_paths(
+    *,
+    china_models: tuple[str, ...] | None = None,
+    include_currents: bool = True,
+    include_globe: bool = True,
+    include_wind: bool = True,
+    include_waves: bool = True,
+) -> dict[str, Any]:
     """Serialized warm of catalog-adjacent OM payloads. Safe to call on idle start.
 
     Order: China 20×15 for GFS + IFS + AIFS (unblocks 预报页 cache keys), then
     currents, globe 16×10 scalars, wind, waves. One OM call at a time; 429
-    falls back to last-good instead of retrying for minutes.
+    skips remaining OM models this pass (retry later with backoff).
     """
     summary: dict[str, Any] = {"ok": [], "errors": {}}
     nx, ny = int(settings.field_nx), int(settings.field_ny)
-    for mid in FORECAST_PREVIEW_MODELS:
+    models = china_models if china_models is not None else FORECAST_PREVIEW_MODELS
+    gap = max(0.0, float(settings.open_meteo_prewarm_gap_seconds))
+    om_429 = False
+    for i, mid in enumerate(models):
+        if om_429:
+            summary["errors"][f"china-fields-{mid}"] = "open-meteo-429"
+            continue
+        if i:
+            await asyncio.sleep(gap)
         try:
-            await fetch_china_fields(mid)
-            summary["ok"].append(f"china-fields:{nx}x{ny}:{mid}:temperature_2m,surface_pressure,precipitation")
+            packed = await fetch_china_fields(mid)
+        except OpenMeteoRateLimit as exc:
+            summary["errors"][f"china-fields-{mid}"] = str(exc)
+            om_429 = True
+            log.warning("prewarm china %sx%s %s: %s", nx, ny, mid, exc)
+            continue
         except Exception as exc:
             summary["errors"][f"china-fields-{mid}"] = str(exc)
             log.warning("prewarm china %sx%s %s: %s", nx, ny, mid, exc)
-    try:
-        await fetch_current_grid("best_match")
-        summary["ok"].append(f"currents:{settings.current_nx}x{settings.current_ny}")
-    except Exception as exc:
-        summary["errors"]["currents"] = str(exc)
-        log.warning("prewarm currents: %s", exc)
-    try:
-        await fetch_globe_fields("gfs_seamless")
-        summary["ok"].append(
-            f"globe-fields:{settings.globe_field_nx}x{settings.globe_field_ny}:temperature_2m,surface_pressure,precipitation"
-        )
-    except Exception as exc:
-        summary["errors"]["globe-fields"] = str(exc)
-        log.warning("prewarm globe-fields: %s", exc)
-    try:
-        await fetch_wind_grid("gfs_seamless", nx=settings.wind_nx, ny=settings.wind_ny)
-        summary["ok"].append(f"wind:{settings.wind_nx}x{settings.wind_ny}")
-    except Exception as exc:
-        summary["errors"]["wind"] = str(exc)
-        log.warning("prewarm wind: %s", exc)
-    try:
-        await fetch_wave_field()
-        summary["ok"].append(f"waves:{settings.wave_nx}x{settings.wave_ny}")
-    except Exception as exe:
-        summary["errors"]["waves"] = str(exe)
-        log.warning("prewarm waves: %s", exe)
+            continue
+        if _china_fields_live_ok(packed):
+            summary["ok"].append(f"china-fields:{nx}x{ny}:{mid}:temperature_2m,surface_pressure,precipitation")
+            continue
+        reason = packed.get("error") or packed.get("degraded") or "incomplete"
+        summary["errors"][f"china-fields-{mid}"] = str(reason)
+        if _is_om_429(reason):
+            om_429 = True
+            log.warning("prewarm china %sx%s %s: %s — skip remaining models this pass", nx, ny, mid, reason)
+
+    if include_currents:
+        try:
+            await fetch_current_grid("best_match")
+            summary["ok"].append(f"currents:{settings.current_nx}x{settings.current_ny}")
+        except Exception as exc:
+            summary["errors"]["currents"] = str(exc)
+            log.warning("prewarm currents: %s", exc)
+
+    if include_globe:
+        if om_429:
+            summary["errors"]["globe-fields"] = "deferred-after-429"
+        else:
+            try:
+                bag = await fetch_globe_fields("gfs_seamless")
+                if globe_bag_is_real(bag) and not bag.get("fallback"):
+                    summary["ok"].append(
+                        f"globe-fields:{settings.globe_field_nx}x{settings.globe_field_ny}:temperature_2m,surface_pressure,precipitation"
+                    )
+                else:
+                    reason = bag.get("degraded") or bag.get("source") or "incomplete"
+                    summary["errors"]["globe-fields"] = str(reason)
+                    if _is_om_429(reason):
+                        om_429 = True
+            except Exception as exc:
+                summary["errors"]["globe-fields"] = str(exc)
+                log.warning("prewarm globe-fields: %s", exc)
+
+    if include_wind:
+        if om_429:
+            summary["errors"]["wind"] = "deferred-after-429"
+        else:
+            try:
+                await fetch_wind_grid("gfs_seamless", nx=settings.wind_nx, ny=settings.wind_ny)
+                summary["ok"].append(f"wind:{settings.wind_nx}x{settings.wind_ny}")
+            except Exception as exc:
+                summary["errors"]["wind"] = str(exc)
+                log.warning("prewarm wind: %s", exc)
+
+    if include_waves:
+        if om_429:
+            summary["errors"]["waves"] = "deferred-after-429"
+        else:
+            try:
+                await fetch_wave_field()
+                summary["ok"].append(f"waves:{settings.wave_nx}x{settings.wave_ny}")
+            except Exception as exe:
+                summary["errors"]["waves"] = str(exe)
+                log.warning("prewarm waves: %s", exe)
     log.info("open-meteo prewarm %s", summary)
+    return summary
+
+
+async def prewarm_hot_paths_resilient() -> dict[str, Any]:
+    """Run serialized prewarm, then retry failed China/globe warms with exponential backoff."""
+    summary = await prewarm_hot_paths()
+    pending = _prewarm_pending(summary)
+    attempt = 1
+    max_attempts = max(1, int(settings.open_meteo_prewarm_max_attempts))
+    while pending and attempt < max_attempts:
+        wait = retry_wait_seconds(
+            attempt,
+            base=float(settings.open_meteo_prewarm_retry_base),
+            cap=float(settings.open_meteo_prewarm_retry_cap_seconds),
+            jitter=True,
+        )
+        log.warning("prewarm retry %s/%s in %.1fs pending=%s", attempt + 1, max_attempts, wait, pending)
+        await asyncio.sleep(wait)
+        china = tuple(mid for mid in FORECAST_PREVIEW_MODELS if f"china-fields-{mid}" in pending)
+        again = await prewarm_hot_paths(
+            china_models=china,
+            include_currents=False,
+            include_globe="globe-fields" in pending,
+            include_wind=False,
+            include_waves=False,
+        )
+        for item in again.get("ok") or []:
+            if item not in summary["ok"]:
+                summary["ok"].append(item)
+        for key in list(summary.get("errors") or {}):
+            if key not in (again.get("errors") or {}) and (
+                key.startswith("china-fields-") or key in {"globe-fields", "wind", "waves"}
+            ):
+                del summary["errors"][key]
+        summary["errors"].update(again.get("errors") or {})
+        pending = _prewarm_pending(again)
+        attempt += 1
+    summary["prewarm_attempts"] = attempt
     return summary
 
 
