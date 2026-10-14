@@ -190,7 +190,7 @@ class OscarCmrUrlTest(unittest.TestCase):
         self.assertFalse(parsed["href"].startswith("s3://"))
 
     def test_opendap_constraints_stay_in_range(self):
-        from app.currents import OSCAR_LAT_LAST, oscar_opendap_request_urls
+        from app.currents import OSCAR_LAT_LAST, OSCAR_LON_LAST, oscar_opendap_request_urls
 
         urls = oscar_opendap_request_urls(
             "https://opendap.earthdata.nasa.gov/collections/C2102958977-POCLOUD/granules/oscar_currents_nrt_20261011"
@@ -198,7 +198,11 @@ class OscarCmrUrlTest(unittest.TestCase):
         self.assertGreaterEqual(len(urls), 2)
         joined = " ".join(urls)
         self.assertNotIn("[0:4:719]", joined)
-        self.assertIn(f"[0:4:{OSCAR_LAT_LAST}]", joined)
+        self.assertNotIn("[0:4:720]", joined)
+        self.assertNotIn("[0:4:1440]", joined)
+        # OSCAR u(time, longitude, latitude) — lon slab first, lat last index = 718
+        self.assertIn(f"[0:4:{OSCAR_LON_LAST}][0:4:{OSCAR_LAT_LAST}]", joined)
+        self.assertNotIn(f"[0:4:{OSCAR_LAT_LAST}][0:4:{OSCAR_LON_LAST}]", joined)
         self.assertTrue(all(u.startswith("https://") for u in urls))
         self.assertEqual(oscar_opendap_request_urls("s3://bucket/key"), [])
 
@@ -212,10 +216,26 @@ class OscarCmrUrlTest(unittest.TestCase):
         next(EarthdataBearer(token).auth_flow(req))
         self.assertEqual(req.headers["Authorization"], f"Bearer {token}")
 
+    def test_stride_indices_never_reach_size(self):
+        from app.currents import OSCAR_NLAT, OSCAR_NLON, axis_last, opendap_hyperslab, stride_indices
+
+        self.assertEqual(axis_last(719), 718)
+        self.assertEqual(axis_last(OSCAR_NLAT), OSCAR_NLAT - 1)
+        self.assertEqual(axis_last(OSCAR_NLON), OSCAR_NLON - 1)
+        lat_idx = stride_indices(719, 4)
+        self.assertTrue(lat_idx.size)
+        self.assertLessEqual(int(lat_idx.max()), 718)
+        self.assertNotIn(719, lat_idx.tolist())
+        self.assertNotIn(720, lat_idx.tolist())
+        lon_idx = stride_indices(1440, 4)
+        self.assertLessEqual(int(lon_idx.max()), 1439)
+        self.assertEqual(opendap_hyperslab(719, 4), "0:4:718")
+        self.assertEqual(opendap_hyperslab(1440, 4), "0:4:1439")
+
     def test_coarsen_native_oscar_grid(self):
         import numpy as np
 
-        from app.currents import coarsen_uv
+        from app.currents import coarsen_uv, stride_indices
 
         u = np.ones((719, 1440))
         v = np.zeros((719, 1440))
@@ -224,8 +244,88 @@ class OscarCmrUrlTest(unittest.TestCase):
         cu, cv, clons, clats = coarsen_uv(u, v, lons, lats, 4)
         self.assertLess(cu.shape[0], 200)
         self.assertEqual(cu.shape[1], clons.size)
+        self.assertEqual(cu.shape[0], clats.size)
+        self.assertEqual(cu.shape[0], stride_indices(719, 4).size)
+        self.assertEqual(cu.shape[1], stride_indices(1440, 4).size)
         already = coarsen_uv(cu, cv, clons, clats, 4)
         self.assertEqual(already[0].shape, cu.shape)
+
+    def test_resample_unoriented_oscar_does_not_index_720(self):
+        """PR#9 HTTPS 200 then: index 720 is out of bounds for axis 1 with size 719."""
+        import numpy as np
+
+        from app.currents import payload_from_daily
+
+        nlat, nlon = 719, 1440
+        u = np.full((nlon, nlat), 0.15)
+        v = np.full((nlon, nlat), 0.05)
+        lons = np.linspace(0.0, 359.75, nlon)
+        lats = np.linspace(-89.75, 89.75, nlat)
+        payload = payload_from_daily(u, v, lons, lats, "oscar-v2:OSCAR_L4_OC_NRT_V2.0", 8, 4)
+        self.assertEqual(payload["width"], 8)
+        self.assertEqual(payload["height"], 4)
+        self.assertIn("oscar", payload["source"])
+
+    def test_coarsen_oscar_lon_lat_layout(self):
+        """HTTPS decode used to keep u(lon, lat)=(1440, 719), then index 720 on axis 1."""
+        import numpy as np
+
+        from app.currents import coarsen_uv, payload_from_daily
+
+        nlat, nlon = 719, 1440
+        # Native OSCAR after squeezing time: (longitude, latitude)
+        u = np.full((nlon, nlat), 0.2)
+        v = np.full((nlon, nlat), -0.05)
+        lons = np.linspace(0.0, 359.75, nlon)
+        lats = np.linspace(-89.75, 89.75, nlat)
+        cu, cv, clons, clats = coarsen_uv(u, v, lons, lats, 4)
+        self.assertEqual(cu.shape[0], clats.size)
+        self.assertEqual(cu.shape[1], clons.size)
+        self.assertLess(cu.shape[0], nlat)
+        payload = payload_from_daily(cu, cv, clons, clats, "oscar-v2:OSCAR_L4_OC_NRT_V2.0", 10, 5)
+        self.assertIn("oscar", payload["source"])
+        self.assertEqual(payload["width"], 10)
+        self.assertEqual(payload["height"], 5)
+
+    def test_decode_oscar_time_lon_lat_netcdf(self):
+        import numpy as np
+        import netCDF4 as nc
+
+        from app.currents import _decode_nc_uv, payload_from_daily
+        from app.ncproc import write_temp
+
+        nlat, nlon = 11, 16
+        lats = np.linspace(-89.75, 89.75, nlat)
+        lons = np.linspace(0.0, 359.75, nlon)
+        uu = np.zeros((nlon, nlat), dtype=np.float32)
+        vv = np.zeros((nlon, nlat), dtype=np.float32)
+        uu[5, 3] = 0.4
+        vv[5, 3] = -0.2
+        path = write_temp(b"", suffix=".nc")
+        try:
+            with nc.Dataset(path, "w", format="NETCDF4") as ds:
+                ds.createDimension("latitude", nlat)
+                ds.createDimension("longitude", nlon)
+                ds.createDimension("time", 1)
+                la = ds.createVariable("lat", "f4", ("latitude",))
+                la[:] = lats
+                lo = ds.createVariable("lon", "f4", ("longitude",))
+                lo[:] = lons
+                t = ds.createVariable("time", "f8", ("time",))
+                t[:] = [0.0]
+                u = ds.createVariable("u", "f4", ("time", "longitude", "latitude"))
+                v = ds.createVariable("v", "f4", ("time", "longitude", "latitude"))
+                u[:] = uu[None, :, :]
+                v[:] = vv[None, :, :]
+            raw = Path(path).read_bytes()
+        finally:
+            Path(path).unlink(missing_ok=True)
+        ou, ov, out_lons, out_lats, meta = _decode_nc_uv(raw)
+        self.assertEqual(ou.shape, (nlat, nlon))
+        self.assertAlmostEqual(float(ou[3, 5]), 0.4, places=5)
+        self.assertAlmostEqual(float(ov[3, 5]), -0.2, places=5)
+        payload = payload_from_daily(ou, ov, out_lons, out_lats, "oscar-v2:test", 8, 4)
+        self.assertIn("oscar", payload["source"])
 
 
 class OscarDailyFetchTest(unittest.IsolatedAsyncioTestCase):

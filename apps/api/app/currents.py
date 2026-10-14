@@ -56,10 +56,15 @@ PODAAC_S3_HTTPS = (
         "https://archive.podaac.earthdata.nasa.gov/podaac-ops-cumulus-public/",
     ),
 )
-# OSCAR v2.0 NRT is 0.25°: 719 lats (0..718) × 1440 lons (0..1439). Index 719 is OOB → HTTP 400.
-OSCAR_LAT_LAST = 718
-OSCAR_LON_LAST = 1439
+# OSCAR v2.0 NRT is 0.25°: latitude=719 (0..718) × longitude=1440 (0..1439).
+# Native layout is u(time, longitude, latitude). Last index is always size-1 (never size / size+1).
+OSCAR_NLAT = 719
+OSCAR_NLON = 1440
+OSCAR_LAT_LAST = OSCAR_NLAT - 1  # 718
+OSCAR_LON_LAST = OSCAR_NLON - 1  # 1439
 OSCAR_DAP_STRIDE = 4
+_LAT_DIMS = frozenset({"lat", "latitude", "y"})
+_LON_DIMS = frozenset({"lon", "longitude", "x"})
 
 _http: httpx.AsyncClient | None = None
 _earthdata_token: str | None = None
@@ -149,11 +154,76 @@ def wrap_lon_360(lon: np.ndarray) -> np.ndarray:
     return ((out + 180.0) % 360.0) - 180.0
 
 
+def axis_last(size: int) -> int:
+    """Inclusive last index for a 1-D axis. size 719 → 718; never size or size+1."""
+    n = int(size)
+    if n <= 0:
+        return 0
+    return n - 1
+
+
+def stride_indices(size: int, stride: int = 1) -> np.ndarray:
+    """0, stride, … ≤ size-1. Never includes size or size+1 (720 on a 719-long axis)."""
+    n = int(size)
+    step = max(int(stride), 1)
+    if n <= 0:
+        return np.zeros(0, dtype=int)
+    last = axis_last(n)
+    idx = np.arange(0, last + 1, step, dtype=int)
+    return idx[idx <= last]
+
+
+def opendap_hyperslab(size: int, stride: int = 1) -> str:
+    """DAP2 `start:stride:stop` with inclusive stop = size-1."""
+    return f"0:{max(int(stride), 1)}:{axis_last(size)}"
+
+
+def orient_uv_lat_lon(
+    u: np.ndarray,
+    v: np.ndarray,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    dims: tuple[str, ...] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return u/v as (nlat, nlon). OSCAR native arrays are (nlon, nlat) after dropping time."""
+    uu = np.asarray(u, dtype=float)
+    vv = np.asarray(v, dtype=float)
+    lon_axis = np.asarray(lons, dtype=float).reshape(-1)
+    lat_axis = np.asarray(lats, dtype=float).reshape(-1)
+    while uu.ndim > 2:
+        uu = uu[0]
+        vv = vv[0]
+    if uu.ndim != 2:
+        return uu, vv, lon_axis, lat_axis
+    nlat, nlon = int(lat_axis.size), int(lon_axis.size)
+    swap = False
+    if dims:
+        named = [str(d).lower() for d in dims if str(d).lower() not in {"time", "depth", "elevation", "lev", "z"}]
+        if len(named) >= 2:
+            d0, d1 = named[-2], named[-1]
+            if d0 in _LON_DIMS and d1 in _LAT_DIMS:
+                swap = True
+            elif d0 in _LAT_DIMS and d1 in _LON_DIMS:
+                swap = False
+    if not swap and uu.shape == (nlon, nlat) and uu.shape != (nlat, nlon):
+        swap = True
+    if swap:
+        uu = np.swapaxes(uu, -1, -2)
+        vv = np.swapaxes(vv, -1, -2)
+    return uu, vv, lon_axis, lat_axis
+
+
 def sort_lon_columns(
     lons: np.ndarray, u: np.ndarray, v: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    u = np.asarray(u)
+    v = np.asarray(v)
+    lons = np.asarray(lons)
+    if u.ndim == 2 and u.shape[1] != lons.size and u.shape[0] == lons.size:
+        u = np.swapaxes(u, -1, -2)
+        v = np.swapaxes(v, -1, -2)
     order = np.argsort(wrap_lon_360(lons))
-    return wrap_lon_360(lons)[order], np.asarray(u)[:, order], np.asarray(v)[:, order]
+    return wrap_lon_360(lons)[order], u[:, order], v[:, order]
 
 
 def ensure_north_to_south(
@@ -175,7 +245,8 @@ def resample_uv(
     ny: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Bilinear sample of a regular lat/lon u/v field onto nx×ny (rows north→south)."""
-    lons, u, v = sort_lon_columns(src_lons, src_u, src_v)
+    u, v, src_lons, src_lats = orient_uv_lat_lon(src_u, src_v, src_lons, src_lats)
+    lons, u, v = sort_lon_columns(src_lons, u, v)
     lats, u, v = ensure_north_to_south(np.asarray(src_lats, dtype=float), u, v)
     dest_lons = np.linspace(bbox["west"], bbox["east"], nx)
     dest_lats = np.linspace(bbox["north"], bbox["south"], ny)
@@ -429,14 +500,13 @@ def _decode_nc_uv(raw: bytes) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.nd
             raise RuntimeError("no lat/lon in netcdf")
         lats = np.asarray(ds[lat_name].values, dtype=float).reshape(-1)
         lons = np.asarray(ds[lon_name].values, dtype=float).reshape(-1)
+        remaining = tuple(str(d) for d in u.dims)
         uu = np.asarray(u.values, dtype=float)
         vv = np.asarray(v.values, dtype=float)
-        while uu.ndim > 2:
-            uu = uu[0]
-            vv = vv[0]
+        uu, vv, lons, lats = orient_uv_lat_lon(uu, vv, lons, lats, remaining)
         uu = np.where(np.isfinite(uu) & (np.abs(uu) < 5), uu, 0.0)
         vv = np.where(np.isfinite(vv) & (np.abs(vv) < 5), vv, 0.0)
-        meta = {"u": u_name, "v": v_name, "lat": lat_name, "lon": lon_name}
+        meta = {"u": u_name, "v": v_name, "lat": lat_name, "lon": lon_name, "dims": remaining}
         return uu, vv, lons, lats, meta
     finally:
         ds.close()
@@ -570,14 +640,14 @@ def parse_oscar_granule(entry: dict[str, Any]) -> dict[str, str]:
 
 
 def oscar_opendap_request_urls(base: str) -> list[str]:
-    """Hardened DAP2 netCDF URLs. Do not request lat index 719 (size 719 → last is 718)."""
+    """DAP2 netCDF URLs. OSCAR is u(time, longitude, latitude); last index is size-1."""
     root = http_fetch_url((base or "").rstrip("/"))
     if not root:
         return []
-    lat = f"0:{OSCAR_DAP_STRIDE}:{OSCAR_LAT_LAST}"
-    lon = f"0:{OSCAR_DAP_STRIDE}:{OSCAR_LON_LAST}"
+    lon = opendap_hyperslab(OSCAR_NLON, OSCAR_DAP_STRIDE)
+    lat = opendap_hyperslab(OSCAR_NLAT, OSCAR_DAP_STRIDE)
     return [
-        f"{root}.nc?u[0][{lat}][{lon}],v[0][{lat}][{lon}]",
+        f"{root}.nc?u[0][{lon}][{lat}],v[0][{lon}][{lat}]",
         f"{root}.nc?u,v",
     ]
 
@@ -589,10 +659,18 @@ def coarsen_uv(
     lats: np.ndarray,
     step: int = OSCAR_DAP_STRIDE,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Downsample a dense native OSCAR grid before the daily cache; skip already-strided fields."""
-    if step <= 1 or u.ndim != 2 or u.shape[0] < 400 or u.shape[1] < 800:
+    """Downsample a dense native OSCAR grid. Indices are 0..size-1, never size or size+1."""
+    u, v, lons, lats = orient_uv_lat_lon(u, v, lons, lats)
+    if step <= 1 or u.ndim != 2:
         return u, v, lons, lats
-    return u[::step, ::step], v[::step, ::step], np.asarray(lons)[::step], np.asarray(lats)[::step]
+    nlat, nlon = int(u.shape[0]), int(u.shape[1])
+    if nlat < 400 or nlon < 800:
+        return u, v, lons, lats
+    iy = stride_indices(nlat, step)
+    ix = stride_indices(nlon, step)
+    iy = iy[iy <= axis_last(lats.size)]
+    ix = ix[ix <= axis_last(lons.size)]
+    return u[np.ix_(iy, ix)], v[np.ix_(iy, ix)], lons[ix], lats[iy]
 
 
 def _looks_like_netcdf(raw: bytes) -> bool:
