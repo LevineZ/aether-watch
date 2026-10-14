@@ -1,6 +1,6 @@
 # Boundary data
 
-Forecast and Earth maps overlay `china-prc.geojson` (also copied to `apps/web/public/geo/` for the Nuxt static path). OpenFreeMap / OSM country lines are muted so Taiwan is not drawn as a separate country.
+Forecast and Earth maps overlay `china-prc.geojson` (also copied to `apps/web/public/geo/` for the Nuxt static path). The client loads `/geo/china-prc.geojson` first, then `/api/geo/china-prc.json`. Layers are a **highlighted** land outline + 南海诸岛十段线 (wide casing + bright stroke, moved above the heatmap / particles). OpenFreeMap / OSM country lines are muted so Taiwan is not drawn as a separate country.
 
 | Layer | File property `kind` | Source | Notes |
 | --- | --- | --- | --- |

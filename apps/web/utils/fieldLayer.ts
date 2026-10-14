@@ -92,27 +92,94 @@ function buildMesh(west: number, south: number, east: number, north: number, tx:
   return new Float32Array(verts)
 }
 
-function packGrid(field: ScalarField) {
-  const ny = field.values.length
-  const nx = field.values[0]?.length || 0
+function packGrid(field: ScalarField, scale = 4) {
+  const srcNy = field.values.length
+  const srcNx = field.values[0]?.length || 0
   const span = field.max - field.min || 1
+  const nx = Math.max(2, srcNx * scale)
+  const ny = Math.max(2, srcNy * scale)
   const pix = new Uint8Array(nx * ny * 4)
   for (let j = 0; j < ny; j++) {
     for (let i = 0; i < nx; i++) {
-      const v = field.values[j][i]
+      const x = (i / Math.max(1, nx - 1)) * Math.max(0, srcNx - 1)
+      const y = (j / Math.max(1, ny - 1)) * Math.max(0, srcNy - 1)
+      const v = sampleBicubicField(field.values, x, y)
       const o = (j * nx + i) * 4
       if (v == null || !Number.isFinite(v)) {
         pix[o + 3] = 0
         continue
       }
       const t = Math.min(1, Math.max(0, (v - field.min) / span))
-      pix[o] = Math.round(t * 255)
+      const s = t * t * (3 - 2 * t)
+      pix[o] = Math.round(s * 255)
       pix[o + 1] = pix[o]
       pix[o + 2] = pix[o]
       pix[o + 3] = 255
     }
   }
   return { pix, nx, ny }
+}
+
+function atField(grid: (number | null)[][], ix: number, iy: number) {
+  const ny = grid.length
+  const nx = grid[0]?.length || 0
+  const x = Math.max(0, Math.min(nx - 1, ix))
+  const y = Math.max(0, Math.min(ny - 1, iy))
+  const v = grid[y][x]
+  return v != null && Number.isFinite(v) ? v : null
+}
+
+function cubicHermite(p0: number, p1: number, p2: number, p3: number, t: number) {
+  return (
+    p1 +
+    0.5 *
+      t *
+      (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)))
+  )
+}
+
+function sampleBicubicField(grid: (number | null)[][], x: number, y: number) {
+  const ny = grid.length
+  const nx = grid[0]?.length || 0
+  if (!nx || !ny) return null
+  const x0 = Math.floor(x)
+  const y0 = Math.floor(y)
+  const fx = x - x0
+  const fy = y - y0
+  const cols: number[] = []
+  for (let jj = -1; jj <= 2; jj++) {
+    const row: number[] = []
+    for (let ii = -1; ii <= 2; ii++) {
+      const v = atField(grid, x0 + ii, y0 + jj)
+      if (v == null) return sampleBilinearField(grid, x, y)
+      row.push(v)
+    }
+    cols.push(cubicHermite(row[0], row[1], row[2], row[3], fx))
+  }
+  return cubicHermite(cols[0], cols[1], cols[2], cols[3], fy)
+}
+
+function sampleBilinearField(grid: (number | null)[][], x: number, y: number) {
+  const ny = grid.length
+  const nx = grid[0]?.length || 0
+  if (!nx || !ny) return null
+  const x0 = Math.max(0, Math.min(nx - 1, Math.floor(x)))
+  const y0 = Math.max(0, Math.min(ny - 1, Math.floor(y)))
+  const x1 = Math.min(nx - 1, x0 + 1)
+  const y1 = Math.min(ny - 1, y0 + 1)
+  const fx = x - x0
+  const fy = y - y0
+  const v00 = grid[y0][x0]
+  const v10 = grid[y0][x1]
+  const v01 = grid[y1][x0]
+  const v11 = grid[y1][x1]
+  const w00 = v00 == null ? 0 : (1 - fx) * (1 - fy)
+  const w10 = v10 == null ? 0 : fx * (1 - fy)
+  const w01 = v01 == null ? 0 : (1 - fx) * fy
+  const w11 = v11 == null ? 0 : fx * fy
+  const w = w00 + w10 + w01 + w11
+  if (w <= 1e-6) return null
+  return ((v00 || 0) * w00 + (v10 || 0) * w10 + (v01 || 0) * w01 + (v11 || 0) * w11) / w
 }
 
 function packCmap(palette: Palette) {
@@ -169,15 +236,15 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     const east = field.bbox?.east ?? field.lons[field.lons.length - 1]
     const south = field.bbox?.south ?? field.lats[0]
     const north = field.bbox?.north ?? field.lats[field.lats.length - 1]
-    const spanX = Math.max(8, Math.min(120, Math.round((east - west) / 3)))
-    const spanY = Math.max(6, Math.min(70, Math.round((north - south) / 3)))
+    const spanX = Math.max(16, Math.min(180, Math.round((east - west) / 2)))
+    const spanY = Math.max(12, Math.min(100, Math.round((north - south) / 2)))
     this.verts = buildMesh(west, south, east, north, spanX, spanY)
     this.vertCount = this.verts.length / 4
     if (this.buffer) {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer)
       gl.bufferData(gl.ARRAY_BUFFER, this.verts, gl.DYNAMIC_DRAW)
     }
-    const { pix, nx, ny } = packGrid(field)
+    const { pix, nx, ny } = packGrid(field, 4)
     this.upload(gl, this.gridTex, nx, ny, pix, gl.LINEAR)
     this.upload(gl, this.cmapTex, 256, 1, packCmap(palette), gl.LINEAR)
     this.map?.triggerRepaint()
@@ -298,9 +365,10 @@ void main() {
   vec4 g = texture(u_grid, v_uv);
   if (g.a < 0.05) discard;
   float t = g.r;
+  t = t * t * (3.0 - 2.0 * t);
   vec3 col = texture(u_cmap, vec2(t, 0.5)).rgb;
   float a = u_opacity;
-  if (u_signal > 0.5) a *= pow(clamp(t, 0.0, 1.0), 0.72);
+  if (u_signal > 0.5) a *= pow(clamp(t, 0.0, 1.0), 0.68);
   if (a < 0.02) discard;
   fragColor = vec4(col, a);
 }`

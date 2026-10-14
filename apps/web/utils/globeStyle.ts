@@ -11,12 +11,12 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
   try {
     map.setSky({
       "sky-color": "#02040c",
-      "horizon-color": "#1a3a58",
-      "fog-color": "#071018",
-      "sky-horizon-blend": 0.85,
-      "horizon-fog-blend": 0.7,
-      "fog-ground-blend": 0.35,
-      "atmosphere-blend": ["interpolate", ["linear"], ["zoom"], 0, 0.92, 3, 0.7, 6, 0.12, 8, 0],
+      "horizon-color": "#24506e",
+      "fog-color": "#08141e",
+      "sky-horizon-blend": 0.88,
+      "horizon-fog-blend": 0.62,
+      "fog-ground-blend": 0.28,
+      "atmosphere-blend": ["interpolate", ["linear"], ["zoom"], 0, 0.95, 3, 0.72, 6, 0.14, 8, 0],
     } as never)
   } catch {
     try {
@@ -28,7 +28,7 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
     }
   }
   try {
-    map.setLight({ anchor: "viewport", position: [1.35, 210, 38], intensity: 0.42 } as never)
+    map.setLight({ anchor: "viewport", position: [1.4, 205, 42], intensity: 0.5 } as never)
   } catch {
     /* optional */
   }
@@ -60,15 +60,15 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
       }
       if (type === "fill" || type === "fill-extrusion") {
         if (src.includes("water") || src.includes("ocean") || src.includes("sea")) {
-          map.setPaintProperty(id, "fill-color", "#071018")
+          map.setPaintProperty(id, "fill-color", "#06121c")
           if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
         } else if (src.includes("building")) {
           map.setLayoutProperty(id, "visibility", "none")
         } else if (src.includes("landcover") || src.includes("landuse") || src.includes("park")) {
-          map.setPaintProperty(id, "fill-color", "#1a2430")
-          map.setPaintProperty(id, "fill-opacity", 0.85)
+          map.setPaintProperty(id, "fill-color", "#223244")
+          map.setPaintProperty(id, "fill-opacity", 0.9)
         } else if (src.includes("land")) {
-          map.setPaintProperty(id, "fill-color", "#243140")
+          map.setPaintProperty(id, "fill-color", "#2a3b4e")
           if (type === "fill") map.setPaintProperty(id, "fill-opacity", 1)
         }
       }
@@ -84,13 +84,11 @@ export function restyleGlobe(map: MlMap, lang: LabelLang = "zh") {
         ) {
           map.setLayoutProperty(id, "visibility", "none")
         } else if (src.includes("bound") || src.includes("admin") || src.includes("country")) {
-          map.setPaintProperty(id, "line-color", "#8a9bb0")
-          map.setPaintProperty(id, "line-opacity", 0.22)
-          map.setPaintProperty(id, "line-width", 0.55)
+          map.setLayoutProperty(id, "visibility", "none")
         } else if (src.includes("water") || src.includes("coast")) {
-          map.setPaintProperty(id, "line-color", "#3d6a82")
-          map.setPaintProperty(id, "line-opacity", 0.7)
-          map.setPaintProperty(id, "line-width", 0.7)
+          map.setPaintProperty(id, "line-color", "#4a86a0")
+          map.setPaintProperty(id, "line-opacity", 0.82)
+          map.setPaintProperty(id, "line-width", 0.95)
           map.setLayoutProperty(id, "visibility", "visible")
         } else {
           map.setLayoutProperty(id, "visibility", "none")

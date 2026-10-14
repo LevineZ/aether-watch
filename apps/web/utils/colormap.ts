@@ -10,13 +10,13 @@ function hexToRgb(hex: string): [number, number, number] {
 }
 
 const STOPS: Record<Palette, string[]> = {
-  thermal: ["#1d3557", "#457b9d", "#a8dadc", "#f1faee", "#f4a261", "#c1440e", "#6d2b0a"],
-  wind: ["#0b1d2a", "#1b4d6b", "#3f8f7a", "#d9c56e", "#f3f0e6"],
-  current: ["#03141c", "#0a3a4a", "#1c8a9a", "#5ad0c8", "#e7fff6"],
-  rain: ["#f7f4ee", "#cde4d6", "#6db3a8", "#1d6a7a", "#0b3b4a"],
-  humidity: ["#f4e4c1", "#c4d6a0", "#6aa88a", "#2f6f6a", "#1b3b40"],
-  pressure: ["#5b2c6f", "#7b6bb0", "#f7f4ee", "#e0a454", "#9a3412"],
-  cloud: ["#1c1915", "#6b6258", "#cfc4b4", "#f7f4ee"],
+  thermal: ["#1b2a4a", "#2f5f86", "#4f93b8", "#98d0d4", "#f3f6e8", "#f6c07a", "#d96a28", "#9a2f0c"],
+  wind: ["#0b1d2a", "#163e58", "#2b6f78", "#5aaa7a", "#d4c56a", "#f4efe4"],
+  current: ["#03141c", "#073040", "#0f6170", "#1c9aa4", "#6ad8cc", "#e9fff6"],
+  rain: ["#f7f4ee", "#dceee4", "#9dcec2", "#4e9aa0", "#1c6274", "#0b3b4a"],
+  humidity: ["#f4e4c1", "#d5dda8", "#8fbe90", "#4a8a7a", "#2a5c58", "#1b3b40"],
+  pressure: ["#4a1f5c", "#6d5aa4", "#c8c4dc", "#f7f4ee", "#e8b56a", "#b85a1c"],
+  cloud: ["#1c1915", "#4a433c", "#8a8176", "#cfc4b4", "#f7f4ee"],
 }
 
 export function colorAt(palette: Palette, t: number): [number, number, number] {

@@ -17,7 +17,7 @@ import { WindParticleLayer, type FlowKind } from "~/utils/windLayer"
 import type { Wind } from "~/utils/windField"
 import type { Palette } from "~/utils/colormap"
 import { applyPlaceLabels, loadOpenFreeMapStyle, OPENFREEMAP_DARK } from "~/utils/mapLabels"
-import { applyChinaBorders } from "~/utils/chinaBorders"
+import { applyChinaBorders, raiseChinaBorders } from "~/utils/chinaBorders"
 
 const props = defineProps<{
   flow: Wind | null
@@ -49,9 +49,10 @@ function paintOverlay() {
   const palette = props.palette || "thermal"
   scalarLayer.setField(field, palette, {
     signalAlpha: signalPalette(palette),
-    opacity: signalPalette(palette) ? 0.88 : 0.46,
+    opacity: signalPalette(palette) ? 0.86 : 0.42,
   })
   layer?.setVisible(!field)
+  raiseChinaBorders(map)
   map.triggerRepaint()
 }
 
@@ -105,7 +106,7 @@ onMounted(async () => {
     }
     if (!map.getLayer(layer.id)) map.addLayer(layer)
     paintOverlay()
-    applyChinaBorders(map, "globe")
+    void applyChinaBorders(map, "globe").then(() => raiseChinaBorders(map))
     ready.value = true
     emit("ready")
   })

@@ -1,0 +1,58 @@
+AetherWatch — Mac Docker Compose deploy
+=======================================
+
+This tree is the PR head for the post-#2 Mac deploy fixes
+(borders, overlays, current-particle seeding, Open-Meteo 429 throttle).
+
+Apple Silicon and Intel both work with Compose.
+
+Rebuild api + web (and worker if you run the cache warmer)
+----------------------------------------------------------
+
+From this directory (the extracted tree):
+
+    cp -n .env.example .env   # optional; compose has working defaults
+    docker compose up -d --build api worker web
+
+Caddy still fronts the stack at http://127.0.0.1:8765
+(or AETHERWATCH_PORT). Do not rebuild postgres / redis / minio / caddy
+unless their configs changed.
+
+What you should see
+-------------------
+
+- Earth: PRC land outline + 南海诸岛十段线 as a bright gold highlight
+  (above particles / overlays).
+- Forecast: the same borders as a vermillion highlight above the heatmap.
+- Currents: particles seeded across Pacific / Atlantic / Indian / Southern
+  / China seas — not piled only in 南海.
+
+Stale Redis overlays
+--------------------
+
+Cache keys are versioned (field:v4:, currents:v3:, wind:v2:).
+Flush only if you still see an old overlay after rebuild:
+
+    docker compose exec redis redis-cli FLUSHDB
+
+Open-Meteo (do not hammer)
+--------------------------
+
+Defaults are conservative on purpose (free API 429s easily):
+
+    OPEN_METEO_CONCURRENCY=1
+    OPEN_METEO_BATCH_SIZE=48
+    OPEN_METEO_MIN_INTERVAL_SECONDS=0.75
+
+Do not raise concurrency above 1 on a laptop deploy.
+First field fetch is slower on a cold cache (serial + paced);
+after that Redis serves it. On 429 the API backs off and prefers
+the last-good cache. Optionally lower FIELD_NX / FIELD_NY.
+
+Useful commands
+---------------
+
+    docker compose up -d --build api worker web
+    docker compose logs -f api web
+    docker compose exec redis redis-cli FLUSHDB
+    docker compose down
